@@ -341,9 +341,8 @@ static void handleDi2Data(const uint8_t* data, size_t len) {
 
   for (size_t idx = 0; idx < channels; idx++) {
     uint8_t raw = data[idx + 1];
-    if (raw == DI2_UNMAPPED) continue;
-
-    PressType press = decodePress(raw);
+    PressType press = decodePress(raw);  // 0xF0 (idle) decodes to PRESS_NONE and re-arms the channel
+    Serial.printf("[Di2] ch%u raw 0x%02X\n", (unsigned)(idx + 1), raw);
     PressType previous = lastPress[idx];
     if (press == previous) continue;
 
