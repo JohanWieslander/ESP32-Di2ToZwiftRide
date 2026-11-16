@@ -20,6 +20,8 @@ enum ObcButton : uint8_t {
   OBC_SELECT = 0x14,
   OBC_BACK = 0x15,
   OBC_MENU = 0x16,
+  OBC_STEER_LEFT = 0x18,
+  OBC_STEER_RIGHT = 0x19,
   OBC_EMOTE = 0x20,
   OBC_SCREENSHOT = 0x24,
   OBC_DIFF_UP = 0x30,
@@ -38,8 +40,8 @@ struct ChannelMap {
 static const ChannelMap CHANNEL_MAP[4] = {
   { OBC_SHIFT_UP, OBC_BACK, OBC_SELECT },
   { OBC_SHIFT_DOWN, OBC_SELECT, OBC_BACK },
-  { OBC_NAV_LEFT, OBC_EMOTE, OBC_EMOTE },
-  { OBC_NAV_RIGHT, OBC_POWER_UP, OBC_LAP },
+  { OBC_NAV_LEFT, OBC_STEER_LEFT, OBC_EMOTE },
+  { OBC_NAV_RIGHT, OBC_STEER_RIGHT, OBC_LAP },
 };
 
 static NimBLEUUID DI2_SERVICE_UUID("000018ef-5348-494d-414e-4f5f424c4500");
@@ -128,7 +130,8 @@ static void queueRideEvent(const RideEvent& event) {
 
 static void sendZwiftInput() {
   if (!zwiftConnected || !zwiftHandshake || zwiftAsync->getSubscribedCount() == 0) return;
-  ZwiftRide::Bytes msg = ZwiftRide::inputReport(zwiftButtons.released());
+  ZwiftRide::Bytes msg = ZwiftRide::inputReport(
+      zwiftButtons.released(), zwiftButtons.leftSteering(), zwiftButtons.rightSteering());
   zwiftAsync->setValue(msg.data(), msg.size());
   zwiftAsync->notify();
   lastZwiftInput = millis();
@@ -159,6 +162,8 @@ static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
     case OBC_NAV_DOWN: action = ZwiftRide::Action::Down; break;
     case OBC_NAV_LEFT: action = ZwiftRide::Action::Left; break;
     case OBC_NAV_RIGHT: action = ZwiftRide::Action::Right; break;
+    case OBC_STEER_LEFT: action = ZwiftRide::Action::SteerLeft; break;
+    case OBC_STEER_RIGHT: action = ZwiftRide::Action::SteerRight; break;
     case OBC_SELECT: action = ZwiftRide::Action::Select; break;
     case OBC_BACK: action = ZwiftRide::Action::Back; break;
     case OBC_MENU: action = ZwiftRide::Action::Menu; break;

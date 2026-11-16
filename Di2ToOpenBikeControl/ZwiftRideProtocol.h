@@ -22,6 +22,10 @@ inline void number(Bytes& out, uint8_t field, uint32_t value) {
   varint(out, value);
 }
 
+inline void signedNumber(Bytes& out, uint8_t field, int32_t value) {
+  number(out, field, (uint32_t(value) << 1) ^ (value < 0 ? UINT32_MAX : 0));
+}
+
 inline void bytes(Bytes& out, uint8_t field, const Bytes& value) {
   varint(out, (field << 3) | 2);
   varint(out, value.size());
@@ -72,9 +76,15 @@ inline bool getObjectId(const uint8_t* data, size_t length, uint32_t& object) {
   return found;
 }
 
-inline Bytes inputReport(uint32_t releasedButtons) {
+inline Bytes inputReport(uint32_t releasedButtons, int32_t left = 0, int32_t right = 0) {
   Bytes out{0x23};
   number(out, 1, releasedButtons);
+  for (uint8_t location = 0; location < 2; ++location) {
+    Bytes axis;
+    number(axis, 1, location);
+    signedNumber(axis, 2, location == 0 ? left : right);
+    bytes(out, 3, axis);
+  }
   return out;
 }
 
@@ -98,7 +108,14 @@ inline bool getResponse(uint32_t object, Bytes& out) {
     }
     case 0x0400:
       number(data, 1, 0xFFFF);
-      number(data, 2, 0);  // Digital controls only; no steering paddles.
+      number(data, 2, 3);
+      for (uint8_t location = 0; location < 2; ++location) {
+        Bytes axis;
+        number(axis, 1, location);
+        signedNumber(axis, 2, -100);
+        signedNumber(axis, 3, 100);
+        bytes(data, 3, axis);
+      }
       break;
     case 0x0303:
       number(data, 1, 0);
@@ -121,7 +138,7 @@ inline bool getResponse(uint32_t object, Bytes& out) {
 
 enum class Action : uint8_t {
   ShiftUp, ShiftDown, IntensityUp, IntensityDown, Up, Down, Left, Right,
-  Select, Back, Menu, Emote, PowerUp
+  Select, Back, Menu, Emote, PowerUp, SteerLeft, SteerRight
 };
 
 class Buttons {
@@ -143,6 +160,14 @@ class Buttons {
       if (active_ & (uint32_t(1) << action)) value &= ~(uint32_t(1) << key(action));
     }
     return value;
+  }
+
+  int32_t leftSteering() const {
+    return (active_ & (1U << static_cast<uint8_t>(Action::SteerLeft))) ? -100 : 0;
+  }
+
+  int32_t rightSteering() const {
+    return (active_ & (1U << static_cast<uint8_t>(Action::SteerRight))) ? 100 : 0;
   }
 
   static uint8_t key(uint8_t action) {
