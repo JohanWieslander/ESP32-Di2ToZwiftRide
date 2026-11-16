@@ -146,7 +146,7 @@ class Buttons {
   void reset() { active_ = 0; }
 
   bool update(Action button, bool pressed) {
-    // OBC actions that share a Ride key retain independent state.
+    // Actions that share a Ride key retain independent state.
     uint32_t mask = uint32_t(1) << static_cast<uint8_t>(button);
     bool changed = ((active_ & mask) != 0) != pressed;
     if (pressed) active_ |= mask;

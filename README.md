@@ -52,19 +52,6 @@ after connection establishes a baseline without triggering actions. Subsequent
 actions are dispatched only when a raw channel byte changes. A transition to
 idle/unmapped `0xF0` releases a held action and re-arms the channel.
 
-An OpenBikeControl BLE GATT service is also available:
-
-- Service: `d273f680-d548-419d-b9d1-fa0472345229`
-- Button state (read/notify): `d273f681-d548-419d-b9d1-fa0472345229`
-- Haptics (write): `d273f682-d548-419d-b9d1-fa0472345229`
-- App information (write): `d273f683-d548-419d-b9d1-fa0472345229`
-
-OBC button events use `[0x01, button ID, state]`, with 80 ms single/double
-presses, including U-turn. The OBC service UUID is not advertised because
-the primary advertising packet is used for Ride discovery. Apps filtering
-by the OBC service UUID may not find the bridge. OBC haptic and app-information
-writes are accepted but not acted on.
-
 ## Build and flash
 
 The project pins PlatformIO's Espressif32 platform to 6.10.0 (Arduino-ESP32

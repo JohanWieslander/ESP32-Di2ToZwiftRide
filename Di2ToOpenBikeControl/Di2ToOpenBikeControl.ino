@@ -61,7 +61,6 @@ struct BleEvent {
   uint8_t data[5];
 };
 
-static const uint8_t MSG_BUTTON_STATE = 0x01;
 static const uint8_t STATE_RELEASED = 0x00;
 static const uint8_t STATE_PRESSED = 0x01;
 
@@ -138,20 +137,6 @@ static void sendZwiftInput() {
   lastZwiftInput = millis();
 }
 
-// ---- OpenBikeControl BLE transport (for BikeControl and other OBC apps) ----
-static NimBLEUUID OBC_BLE_SERVICE_UUID("d273f680-d548-419d-b9d1-fa0472345229");
-static const char* OBC_BLE_BUTTON_UUID = "d273f681-d548-419d-b9d1-fa0472345229";
-static const char* OBC_BLE_HAPTIC_UUID = "d273f682-d548-419d-b9d1-fa0472345229";
-static const char* OBC_BLE_APPINFO_UUID = "d273f683-d548-419d-b9d1-fa0472345229";
-static NimBLECharacteristic* obcBleButton = nullptr;
-static bool obcBleConnected = false;
-
-static void notifyObcBle(const uint8_t* msg, size_t len) {
-  if (obcBleButton == nullptr || !obcBleConnected) return;
-  obcBleButton->setValue(msg, len);
-  obcBleButton->notify();
-}
-
 static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
   ZwiftRide::Action action;
   switch (buttonId) {
@@ -173,7 +158,7 @@ static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
     case OBC_POWER_UP: action = ZwiftRide::Action::PowerUp; break;
     default:
       if (state == STATE_PRESSED) {
-        Serial.printf("[Ride] OBC action 0x%02X has no Ride mapping (OBC output retained)\n", buttonId);
+        Serial.printf("[Ride] action 0x%02X has no Ride mapping\n", buttonId);
       }
       return;
   }
@@ -182,7 +167,7 @@ static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
       zwiftDownPressedAt = millis();
       zwiftDownReleasePending = false;
     } else if (millis() - zwiftDownPressedAt < 2000) {
-      // Ride's U-turn binding requires a hold, unlike the OBC momentary action.
+      // Ride's U-turn binding requires a hold, not a momentary press.
       zwiftDownReleasePending = true;
       return;
     }
@@ -298,12 +283,12 @@ static void serviceZwiftRide() {
   while (xQueueReceive(rideEventQueue, &event, 0) == pdPASS) {
     if (event.type == RIDE_CONNECT) {
       zwiftConnHandle = event.connection;
-      zwiftConnected = obcBleConnected = true;
+      zwiftConnected = true;
       zwiftHandshake = zwiftSyncBusy = false;
       zwiftReplies.clear();
       Serial.println("[Ride] central connected");
     } else if (event.type == RIDE_DISCONNECT && event.connection == zwiftConnHandle) {
-      zwiftConnected = obcBleConnected = false;
+      zwiftConnected = false;
       zwiftHandshake = zwiftSyncBusy = false;
       zwiftConnHandle = BLE_HS_CONN_HANDLE_NONE;
       zwiftReplies.clear();
@@ -372,15 +357,6 @@ static void startZwiftRide() {
   level->setValue(&externalPowerLevel, 1);
   battery->start();
 
-  NimBLEService* obcService = server->createService(OBC_BLE_SERVICE_UUID);
-  obcBleButton = obcService->createCharacteristic(
-      OBC_BLE_BUTTON_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  obcService->createCharacteristic(OBC_BLE_HAPTIC_UUID,
-                                   NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  obcService->createCharacteristic(OBC_BLE_APPINFO_UUID,
-                                   NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  obcService->start();
-
   // 29-byte primary payload: flags + 128-bit user-input service data + Ride manufacturer data.
   NimBLEAdvertisementData advertisement;
   advertisement.setFlags(0x06);
@@ -394,15 +370,13 @@ static void startZwiftRide() {
   adv->setScanResponseData(scanResponse);
   adv->setScanResponse(true);
   adv->start();
-  Serial.println("[Ride] experimental Zwift Ride advertising; OBC GATT service retained");
+  Serial.println("[Ride] advertising Zwift Ride");
 }
 
 static void sendButton(uint8_t buttonId, uint8_t state) {
   if (buttonId == OBC_NONE) return;
-  uint8_t msg[3] = { MSG_BUTTON_STATE, buttonId, state };
-  notifyObcBle(msg, sizeof(msg));
   updateZwiftButton(buttonId, state);
-  Serial.printf("[OBC] button 0x%02X state 0x%02X\n", buttonId, state);
+  Serial.printf("[Ride] button 0x%02X state 0x%02X\n", buttonId, state);
 }
 
 static void releasePendingButton(uint8_t buttonId) {
@@ -653,7 +627,7 @@ void setup() {
   uint32_t serialWaitStart = millis();
   while (!Serial && millis() - serialWaitStart < 2000) delay(10);
   delay(200);
-  Serial.println("\nDi2 -> OpenBikeControl bridge starting");
+  Serial.println("\nDi2 -> Zwift Ride bridge starting");
 
   bleEventQueue = xQueueCreate(16, sizeof(BleEvent));
   if (bleEventQueue == nullptr) {
