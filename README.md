@@ -79,6 +79,25 @@ pio device monitor -e esp32dev
 Replace `esp32dev` with your board's environment. Run `pio run` to build
 all three environments.
 
+## Host tests
+
+Run the portal regression tests with a C++11 compiler, without an ESP32 or
+PlatformIO:
+
+```sh
+c++ -std=c++11 -Wall -Wextra -Werror -I tests/fakes \
+  tests/config_portal_test.cpp -o /tmp/di2-config-portal-test
+/tmp/di2-config-portal-test
+```
+
+These exercise the actual portal handlers with fake Wi-Fi, HTTP, DNS, storage
+and clock APIs. Coverage includes saving/reloading all channel actions, restoring
+defaults, invalid input, storage failures, timeout boundaries and clock wraparound,
+staying open after a connection, and nonblocking save-and-close. They do not
+replace on-device checks of captive-portal detection or Wi-Fi/BLE coexistence.
+The existing `tests/di2_channel_changes_test.cpp` and
+`tests/zwift_ride_protocol_test.cpp` can also be compiled and run directly.
+
 ## Diagnostics and limitations
 
 The serial monitor runs at 115200 baud. It logs Di2 connection/subscription

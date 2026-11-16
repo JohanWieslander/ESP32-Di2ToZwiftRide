@@ -23,6 +23,7 @@ static uint32_t startedAt = 0;
 static bool active = false;
 static bool clientSeen = false;
 static bool closeRequested = false;
+static uint32_t closeRequestedAt = 0;
 
 static uint8_t* slot(ChannelMap& m, int press) {
   return press == 0 ? &m.shortPress : press == 1 ? &m.longPress : &m.doublePress;
@@ -31,7 +32,10 @@ static uint8_t* slot(ChannelMap& m, int press) {
 static String key(int ch, int press) { return String("c") + ch + PRESS_KEYS[press]; }
 
 static void load() {
-  prefs.begin(PREF_NS, true);
+  if (!prefs.begin(PREF_NS, true)) {
+    Serial.println("[Portal] no saved mapping available; using defaults");
+    return;
+  }
   for (int ch = 0; ch < 4; ch++)
     for (int p = 0; p < 3; p++) {
       uint8_t v = prefs.getUChar(key(ch, p).c_str(), *slot(liveMap[ch], p));
@@ -72,39 +76,69 @@ static void sendPage(const String& notice) {
   server.send(200, "text/html", h);
 }
 
-static void applyForm() {
+static bool formError(int status, const char* message) {
+  Serial.printf("[Portal] %s\n", message);
+  server.send(status, "text/plain", message);
+  return false;
+}
+
+static bool applyForm() {
+  ChannelMap candidate[4];
   for (int ch = 0; ch < 4; ch++)
     for (int p = 0; p < 3; p++) {
       String name = key(ch, p);
-      if (!server.hasArg(name)) continue;
-      int v = server.arg(name).toInt();
-      if (isValidButton(v)) *slot(liveMap[ch], p) = (uint8_t)v;
+      if (!server.hasArg(name)) return formError(400, "Missing button action.");
+      String value = server.arg(name);
+      if (value.length() == 0) return formError(400, "Invalid button action.");
+      int v = 0;
+      for (size_t i = 0; i < value.length(); i++) {
+        if (value[i] < '0' || value[i] > '9') return formError(400, "Invalid button action.");
+        v = v * 10 + value[i] - '0';
+        if (v > 255) return formError(400, "Invalid button action.");
+      }
+      if (!isValidButton(v)) return formError(400, "Unsupported button action.");
+      *slot(candidate[ch], p) = static_cast<uint8_t>(v);
     }
-  prefs.begin(PREF_NS, false);
+  if (!prefs.begin(PREF_NS, false)) return formError(500, "Could not open settings storage.");
   for (int ch = 0; ch < 4; ch++)
-    for (int p = 0; p < 3; p++) prefs.putUChar(key(ch, p).c_str(), *slot(liveMap[ch], p));
+    for (int p = 0; p < 3; p++) {
+      if (prefs.putUChar(key(ch, p).c_str(), *slot(candidate[ch], p)) != 1) {
+        prefs.end();
+        return formError(500, "Could not save all settings. Retry saving before rebooting.");
+      }
+    }
   prefs.end();
+  for (int ch = 0; ch < 4; ch++) liveMap[ch] = candidate[ch];
+  return true;
 }
 
 static void handleSave() {
-  applyForm();
+  if (!applyForm()) return;
   sendPage("Saved. Changes apply immediately.");
 }
 
 static void handleSaveClose() {
-  applyForm();
+  if (!applyForm()) return;
   server.send(200, "text/html",
               F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
                 "<body style='font-family:system-ui;background:#111;color:#eee;padding:16px'>"
                 "<h2>Saved</h2><p>The portal is closing. Reboot the bridge to reopen it.</p></body>"));
   closeRequested = true;
+  closeRequestedAt = millis();
 }
 
 static void handleReset() {
-  for (int ch = 0; ch < 4; ch++) liveMap[ch] = DEFAULT_CHANNEL_MAP[ch];
-  prefs.begin(PREF_NS, false);
-  prefs.clear();
+  if (!prefs.begin(PREF_NS, false)) {
+    formError(500, "Could not open settings storage.");
+    return;
+  }
+  bool cleared = prefs.clear();
   prefs.end();
+  if (!cleared) {
+    formError(500, "Could not restore defaults.");
+    return;
+  }
+  for (int ch = 0; ch < 4; ch++) liveMap[ch] = DEFAULT_CHANNEL_MAP[ch];
   sendPage("Defaults restored.");
 }
 
@@ -116,9 +150,12 @@ static void handleRedirect() {
 
 static void begin(ChannelMap* map) {
   liveMap = map;
+  for (int ch = 0; ch < 4; ch++) liveMap[ch] = DEFAULT_CHANNEL_MAP[ch];
   load();
   startedAt = millis();
   active = true;
+  clientSeen = false;
+  closeRequested = false;
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID);  // no password
   dns.start(53, "*", WiFi.softAPIP());
@@ -143,9 +180,7 @@ static void close() {
 static void handle() {
   if (!active) return;
   if (closeRequested) {
-    server.handleClient();
-    delay(200);
-    close();
+    if (millis() - closeRequestedAt >= 200) close();
     return;
   }
   if (!clientSeen) {
