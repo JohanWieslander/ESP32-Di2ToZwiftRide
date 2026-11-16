@@ -1,5 +1,9 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <esp_system.h>
 #include <NimBLEDevice.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -7,16 +11,19 @@
 #include <new>
 #include <vector>
 
-static const char* WIFI_SSID = "YOUR_WIFI_SSID";
-static const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 static const char* OBC_DEVICE_NAME = "Di2 Bridge";
 static const char* OBC_HOSTNAME = "di2bridge";
+static const char* WIFI_PREFERENCES_NAMESPACE = "di2bridge";
+static const char* WIFI_SSID_KEY = "ssid";
+static const char* WIFI_PASSWORD_KEY = "password";
 static const uint16_t OBC_TCP_PORT = 8080;
 static const char* OBC_MANUFACTURER = "DIY";
 static const char* OBC_MODEL = "ESP32-Di2-Bridge";
 static const uint8_t OBC_MAX_CLIENTS = 4;
 static const uint32_t MOMENTARY_PRESS_MS = 80;
 static const uint32_t STATUS_HEARTBEAT_MS = 30000;
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
+static const uint32_t WIFI_DISCONNECT_RESET_MS = 10000;
 
 enum ObcButton : uint8_t {
   OBC_SHIFT_UP = 0x01,
@@ -72,6 +79,12 @@ static const uint8_t STATE_PRESSED = 0x01;
 
 WiFiServer tcpServer(OBC_TCP_PORT);
 WiFiClient clients[OBC_MAX_CLIENTS];
+static DNSServer dnsServer;
+static WebServer portalServer(80);
+static Preferences wifiPreferences;
+static bool networkReady = false;
+static bool portalRunning = false;
+static uint32_t wifiDisconnectedAt = 0;
 static NimBLEClient* bleClient = nullptr;
 static NimBLERemoteCharacteristic* bleButton = nullptr;
 static QueueHandle_t bleEventQueue = nullptr;
@@ -373,31 +386,158 @@ static void processBleEvents() {
   }
 }
 
-static void startWifiAndMdns() {
+static void handleWifiPortalRoot() {
+  static const char page[] =
+      "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+      "<title>Di2 Bridge Wi-Fi</title></head><body><h1>Di2 Bridge Wi-Fi setup</h1>"
+      "<form method='post' action='/save'>"
+      "<label>Wi-Fi name (SSID)<br><input name='ssid' maxlength='32' required></label><br><br>"
+      "<label>Wi-Fi password<br><input name='password' type='password' maxlength='64'></label><br><br>"
+      "<button type='submit'>Save and connect</button></form></body></html>";
+  portalServer.send(200, "text/html", page);
+}
+
+static void redirectToWifiPortal() {
+  portalServer.sendHeader("Location", "/", true);
+  portalServer.send(302, "text/plain", "");
+}
+
+static void handleWifiPortalSave() {
+  if (!portalServer.hasArg("ssid") || !portalServer.hasArg("password")) {
+    portalServer.send(400, "text/plain", "SSID and password fields are required.");
+    return;
+  }
+
+  String ssid = portalServer.arg("ssid");
+  String password = portalServer.arg("password");
+  if (ssid.length() == 0 || ssid.length() > 32 ||
+      (password.length() != 0 && (password.length() < 8 || password.length() > 64))) {
+    portalServer.send(400, "text/plain", "SSID or password length is invalid.");
+    return;
+  }
+  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
+    portalServer.send(500, "text/plain", "Could not open Wi-Fi settings storage.");
+    return;
+  }
+
+  wifiPreferences.putString(WIFI_SSID_KEY, ssid);
+  wifiPreferences.putString(WIFI_PASSWORD_KEY, password);
+  bool credentialsStored = wifiPreferences.getString(WIFI_SSID_KEY, "") == ssid &&
+                          wifiPreferences.getString(WIFI_PASSWORD_KEY, "") == password;
+  wifiPreferences.end();
+  if (!credentialsStored) {
+    portalServer.send(500, "text/plain", "Could not save Wi-Fi settings.");
+    return;
+  }
+  portalServer.send(200, "text/html",
+                    "<!doctype html><html><body><p>Saved. The bridge is restarting and will connect to Wi-Fi.</p></body></html>");
+  delay(500);
+  ESP.restart();
+}
+
+static bool startWifiSetupPortal() {
+  WiFi.mode(WIFI_AP);
+  WiFi.setHostname(OBC_HOSTNAME);
+
+  char setupSsid[32];
+  char setupPassword[17];
+  uint64_t chipId = ESP.getEfuseMac();
+  snprintf(setupSsid, sizeof(setupSsid), "Di2-Bridge-%04X", static_cast<unsigned int>(chipId & 0xFFFF));
+  snprintf(setupPassword, sizeof(setupPassword), "%08lx%08lx",
+           static_cast<unsigned long>(esp_random()), static_cast<unsigned long>(esp_random()));
+  if (!WiFi.softAP(setupSsid, setupPassword, 1, false, 1)) {
+    Serial.println("[WiFi] could not start setup access point");
+    return false;
+  }
+
+  IPAddress portalIp = WiFi.softAPIP();
+  if (!dnsServer.start(53, "*", portalIp)) {
+    Serial.println("[WiFi] captive DNS failed; open http://192.168.4.1 manually");
+  }
+  portalServer.on("/", HTTP_GET, handleWifiPortalRoot);
+  portalServer.on("/save", HTTP_POST, handleWifiPortalSave);
+  portalServer.onNotFound(redirectToWifiPortal);
+  portalServer.begin();
+  portalRunning = true;
+  Serial.printf("[WiFi] setup network: %s\n", setupSsid);
+  Serial.printf("[WiFi] setup password: %s\n", setupPassword);
+  Serial.printf("[WiFi] open http://%s to configure network access\n", portalIp.toString().c_str());
+  return true;
+}
+
+static bool clearStoredWifiCredentials() {
+  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
+    Serial.println("[WiFi] could not open settings storage to clear credentials");
+    return false;
+  }
+  wifiPreferences.remove(WIFI_SSID_KEY);
+  wifiPreferences.remove(WIFI_PASSWORD_KEY);
+  wifiPreferences.end();
+  return true;
+}
+
+static bool startWifiAndMdns() {
+  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
+    Serial.println("[WiFi] could not open settings storage; starting setup portal");
+    if (!startWifiSetupPortal()) {
+      delay(1000);
+      ESP.restart();
+    }
+    return false;
+  }
+  String ssid = wifiPreferences.getString(WIFI_SSID_KEY, "");
+  String password = wifiPreferences.getString(WIFI_PASSWORD_KEY, "");
+  wifiPreferences.end();
+
+  if (ssid.isEmpty()) {
+    Serial.println("[WiFi] no saved network; starting setup portal");
+    if (!startWifiSetupPortal()) {
+      delay(1000);
+      ESP.restart();
+    }
+    return false;
+  }
+
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(OBC_HOSTNAME);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("[WiFi] connecting");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  Serial.printf("[WiFi] connecting to %s", ssid.c_str());
+  uint32_t startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
     Serial.print('.');
   }
-  Serial.printf("\n[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\n[WiFi] connection timed out; clearing saved network and restarting");
+    if (clearStoredWifiCredentials()) {
+      delay(500);
+      ESP.restart();
+      return false;
+    }
+    if (!startWifiSetupPortal()) {
+      delay(1000);
+      ESP.restart();
+    }
+    return false;
+  }
 
+  Serial.printf("\n[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
   tcpServer.begin();
   tcpServer.setNoDelay(true);
   if (!MDNS.begin(OBC_HOSTNAME)) {
     Serial.println("[mDNS] start failed; TCP server is available only by IP");
-    return;
+  } else {
+    MDNS.addService("openbikecontrol", "tcp", OBC_TCP_PORT);
+    MDNS.addServiceTxt("openbikecontrol", "tcp", "version", "1");
+    MDNS.addServiceTxt("openbikecontrol", "tcp", "id", WiFi.macAddress());
+    MDNS.addServiceTxt("openbikecontrol", "tcp", "name", OBC_DEVICE_NAME);
+    MDNS.addServiceTxt("openbikecontrol", "tcp", "service-uuids", "d273f680-d548-419d-b9d1-fa0472345229");
+    MDNS.addServiceTxt("openbikecontrol", "tcp", "manufacturer", OBC_MANUFACTURER);
+    MDNS.addServiceTxt("openbikecontrol", "tcp", "model", OBC_MODEL);
+    Serial.printf("[mDNS] _openbikecontrol._tcp on port %u\n", OBC_TCP_PORT);
   }
-  MDNS.addService("openbikecontrol", "tcp", OBC_TCP_PORT);
-  MDNS.addServiceTxt("openbikecontrol", "tcp", "version", "1");
-  MDNS.addServiceTxt("openbikecontrol", "tcp", "id", WiFi.macAddress());
-  MDNS.addServiceTxt("openbikecontrol", "tcp", "name", OBC_DEVICE_NAME);
-  MDNS.addServiceTxt("openbikecontrol", "tcp", "service-uuids", "d273f680-d548-419d-b9d1-fa0472345229");
-  MDNS.addServiceTxt("openbikecontrol", "tcp", "manufacturer", OBC_MANUFACTURER);
-  MDNS.addServiceTxt("openbikecontrol", "tcp", "model", OBC_MODEL);
-  Serial.printf("[mDNS] _openbikecontrol._tcp on port %u\n", OBC_TCP_PORT);
+  networkReady = true;
+  return true;
 }
 
 void setup() {
@@ -412,7 +552,7 @@ void setup() {
     ESP.restart();
   }
 
-  startWifiAndMdns();
+  if (!startWifiAndMdns()) return;
 
   NimBLEDevice::init(OBC_DEVICE_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -428,6 +568,25 @@ void setup() {
 }
 
 void loop() {
+  if (!networkReady) {
+    if (portalRunning) {
+      dnsServer.processNextRequest();
+      portalServer.handleClient();
+    }
+    delay(2);
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDisconnectedAt = 0;
+  } else if (wifiDisconnectedAt == 0) {
+    wifiDisconnectedAt = millis();
+  } else if (millis() - wifiDisconnectedAt >= WIFI_DISCONNECT_RESET_MS) {
+    Serial.println("[WiFi] connection lost; restarting");
+    delay(500);
+    ESP.restart();
+  }
+
   processBleEvents();
   manageTcpClients();
   servicePendingReleases();

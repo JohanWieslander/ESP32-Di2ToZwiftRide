@@ -11,9 +11,17 @@ over BLE and advertises an OpenBikeControl TCP endpoint over Wi-Fi and mDNS.
   buttons to D-Fly channels 1-4 in Shimano E-Tube Project.
 - Put the ESP32 and the OpenBikeControl app on the same Wi-Fi network.
 
-Edit `WIFI_SSID` and `WIFI_PASSWORD` near the top of
-`Di2ToOpenBikeControl/Di2ToOpenBikeControl.ino` before building. The bridge
-advertises `_openbikecontrol._tcp.local.` on TCP port 8080 as **Di2 Bridge**.
+No Wi-Fi credentials need to be edited into the sketch. On first boot, the
+ESP32 starts a temporary WPA2 setup network named `Di2-Bridge-XXXX`; its
+random password and setup URL are printed to the Serial Monitor at 115200
+baud. Connect a phone or computer to that network and open the captive portal
+(or visit `http://192.168.4.1`), then submit the Wi-Fi SSID and password. The
+credentials are stored in ESP32 NVS and the bridge restarts to connect.
+
+The bridge advertises `_openbikecontrol._tcp.local.` on TCP port 8080 as
+**Di2 Bridge** after connecting to Wi-Fi. If saved credentials fail at boot,
+the bridge clears them and restarts into setup mode. If Wi-Fi is lost for
+10 seconds while running, it restarts and follows the same recovery path.
 
 ## Default D-Fly mappings
 
@@ -52,5 +60,6 @@ versions.
 - The bridge requires an indication-capable Di2 button characteristic and
   reports itself ready only after the indication subscription succeeds.
 - It ignores app-to-device haptic and app-information messages.
-- Wi-Fi credentials are stored in the sketch as plain text; do not commit
-  personal credentials.
+- The temporary WPA2 setup password is printed over USB serial. The local
+  setup page uses HTTP, so configure it only while connected to the bridge's
+  setup network.
