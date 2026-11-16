@@ -344,7 +344,10 @@ static void handleDi2Data(const uint8_t* data, size_t len) {
     PressType press = decodePress(raw);  // 0xF0 (idle) decodes to PRESS_NONE and re-arms the channel
     Serial.printf("[Di2] ch%u raw 0x%02X\n", (unsigned)(idx + 1), raw);
     PressType previous = lastPress[idx];
-    if (press == previous) continue;
+    Serial.printf("[Di2] ch%u raw 0x%02X\n", (unsigned)(idx + 1), raw);
+    // Each short/double indication is a distinct press even if Di2 sends no release in between.
+    bool momentary = press == PRESS_SHORT || press == PRESS_DOUBLE;
+    if (press == previous && !momentary) continue;
 
     if (previous == PRESS_LONG && press != PRESS_LONG) {
       sendButton(heldButton[idx], STATE_RELEASED);
