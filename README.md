@@ -17,26 +17,29 @@ compatibility with Zwift; this branch is for manual testing.
 
 | D-Fly channel | Short press in Zwift | Long press in Zwift | Double press in Zwift |
 |---|---|---|---|
-| CH1 | Shift up | B (Back/menu) | A (Select) |
-| CH2 | Shift down | A (Select) | B (Back/menu) |
-| CH3 | D-pad left (junction left) | Steer left | Z (Ride On) |
-| CH4 | D-pad right (junction right) | Steer right | Unsupported (Lap) |
+| CH1 | Shift down | Y (Use power-up) | B (Back/menu) |
+| CH2 | Shift up | Z (Ride On; hold for bomb) | A (Select) |
+| CH3 | D-pad left (junction left) | Steer left | U-turn (2-second D-pad-down hold) |
+| CH4 | D-pad right (junction right) | Steer right | Action bar |
 
 These are Zwift's contextual Ride bindings, not arbitrary keyboard commands.
 CH3/CH4 short presses select junction turns, not analog road steering.
 Long presses keep the corresponding Ride key held until Di2 reports release.
-CH3/CH4 long presses replace Z/Y with full paddle deflection: left horizontal
+CH3/CH4 long presses send full paddle deflection: left horizontal
 axis -100 or right horizontal axis +100, matching the reference app's
 steering (not braking) direction. Release returns that paddle to zero;
 Di2 disconnect resets both paddles. Simultaneous holds report both paddles.
 Steering strength and Zwift's response still need manual testing.
-A double press emits a single momentary Ride button event.
-No lap command is invented.
+A double press emits a single momentary Ride button event, except CH3,
+which holds D-pad down for two seconds to trigger U-turn.
+CH4 uses Action bar instead of Coffee Break, for which there is no verified
+direct Ride button mapping.
 
 The existing OBC GATT service and action IDs are retained, but its service UUID
 is no longer advertised: Ride discovery fills the primary advertising packet.
 Apps that require OBC UUID-based discovery may not find this experimental build.
-Short/double presses retain their 80 ms duration. Haptics are logged but not executed.
+Short/double presses retain their 80 ms duration except the Ride U-turn hold.
+Haptics are logged but not executed.
 Only one central is intended at a time; advertising resumes after disconnect.
 Device information requires an exchanged MTU of at least 42; an insufficient
 MTU is logged and disconnected rather than transmitting a truncated response.
@@ -55,13 +58,14 @@ over BLE and sends Zwift Ride and OpenBikeControl button events over BLE.
 
 | D-Fly channel | Short press | Long press | Double press |
 |---|---|---|---|
-| CH1 | Shift up | Back/cancel | Select/confirm |
-| CH2 | Shift down | Select/confirm | Back/cancel |
-| CH3 | Navigate left | Steer left | Emote |
-| CH4 | Navigate right | Steer right | Lap |
+| CH1 | Shift down | Power-up 1 | Back/cancel |
+| CH2 | Shift up | Emote | Select/confirm |
+| CH3 | Navigate left | Steer left | U-turn |
+| CH4 | Navigate right | Steer right | Navigate up (Action bar in Ride) |
 
 These are firmware defaults; edit `CHANNEL_MAP` in the sketch to change them.
-Short and double presses are sent as 80 ms momentary presses. Long presses
+Short and double presses are sent as 80 ms momentary presses over OBC.
+The Ride output extends U-turn to a two-second hold. Long presses
 remain pressed until Di2 reports release.
 
 The first Di2 indication after each connection establishes the channel baseline

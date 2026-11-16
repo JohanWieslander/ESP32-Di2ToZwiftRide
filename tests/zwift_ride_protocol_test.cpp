@@ -23,8 +23,9 @@ int main() {
   assert(buttons.released() == UINT32_MAX);
 
   const Action controls[] = {Action::Left, Action::Right, Action::Back,
-                             Action::Select, Action::Emote, Action::PowerUp};
-  const uint8_t keyBits[] = {0, 2, 5, 4, 7, 6};
+                             Action::Select, Action::Emote, Action::PowerUp,
+                             Action::Up, Action::Down};
+  const uint8_t keyBits[] = {0, 2, 5, 4, 7, 6, 1, 3};
   for (size_t i = 0; i < sizeof(keyBits); ++i) {
     assert(buttons.update(controls[i], true));
     assert(buttons.released() == (UINT32_MAX & ~(1U << keyBits[i])));

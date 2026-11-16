@@ -27,6 +27,7 @@ enum ObcButton : uint8_t {
   OBC_DIFF_UP = 0x30,
   OBC_DIFF_DOWN = 0x31,
   OBC_LAP = 0x35,
+  OBC_U_TURN = 0x37,
   OBC_POWER_UP = 0x50,
   OBC_NONE = 0x00,
 };
@@ -38,10 +39,10 @@ struct ChannelMap {
 };
 
 static const ChannelMap CHANNEL_MAP[4] = {
-  { OBC_SHIFT_UP, OBC_BACK, OBC_SELECT },
-  { OBC_SHIFT_DOWN, OBC_SELECT, OBC_BACK },
-  { OBC_NAV_LEFT, OBC_STEER_LEFT, OBC_EMOTE },
-  { OBC_NAV_RIGHT, OBC_STEER_RIGHT, OBC_LAP },
+  { OBC_SHIFT_DOWN, OBC_POWER_UP, OBC_BACK },
+  { OBC_SHIFT_UP, OBC_EMOTE, OBC_SELECT },
+  { OBC_NAV_LEFT, OBC_STEER_LEFT, OBC_U_TURN },
+  { OBC_NAV_RIGHT, OBC_STEER_RIGHT, OBC_NAV_UP },
 };
 
 static NimBLEUUID DI2_SERVICE_UUID("000018ef-5348-494d-414e-4f5f424c4500");
@@ -160,6 +161,7 @@ static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
     case OBC_DIFF_DOWN: action = ZwiftRide::Action::IntensityDown; break;
     case OBC_NAV_UP: action = ZwiftRide::Action::Up; break;
     case OBC_NAV_DOWN: action = ZwiftRide::Action::Down; break;
+    case OBC_U_TURN: action = ZwiftRide::Action::Down; break;
     case OBC_NAV_LEFT: action = ZwiftRide::Action::Left; break;
     case OBC_NAV_RIGHT: action = ZwiftRide::Action::Right; break;
     case OBC_STEER_LEFT: action = ZwiftRide::Action::SteerLeft; break;
