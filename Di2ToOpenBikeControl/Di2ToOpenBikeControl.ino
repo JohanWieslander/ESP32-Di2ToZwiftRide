@@ -3,7 +3,6 @@
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <esp_system.h>
 #include <NimBLEDevice.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -440,12 +439,9 @@ static bool startWifiSetupPortal() {
   WiFi.setHostname(OBC_HOSTNAME);
 
   char setupSsid[32];
-  char setupPassword[17];
   uint64_t chipId = ESP.getEfuseMac();
   snprintf(setupSsid, sizeof(setupSsid), "Di2-Bridge-%04X", static_cast<unsigned int>(chipId & 0xFFFF));
-  snprintf(setupPassword, sizeof(setupPassword), "%08lx%08lx",
-           static_cast<unsigned long>(esp_random()), static_cast<unsigned long>(esp_random()));
-  if (!WiFi.softAP(setupSsid, setupPassword, 1, false, 1)) {
+  if (!WiFi.softAP(setupSsid, nullptr, 1, false, 1)) {
     Serial.println("[WiFi] could not start setup access point");
     return false;
   }
@@ -460,7 +456,6 @@ static bool startWifiSetupPortal() {
   portalServer.begin();
   portalRunning = true;
   Serial.printf("[WiFi] setup network: %s\n", setupSsid);
-  Serial.printf("[WiFi] setup password: %s\n", setupPassword);
   Serial.printf("[WiFi] open http://%s to configure network access\n", portalIp.toString().c_str());
   return true;
 }
