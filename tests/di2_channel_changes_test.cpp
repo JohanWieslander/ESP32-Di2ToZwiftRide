@@ -1,4 +1,4 @@
-#include "../Di2ToOpenBikeControl/Di2ChannelChanges.h"
+#include "../Di2ToZwiftRide/Di2ChannelChanges.h"
 
 #include <assert.h>
 

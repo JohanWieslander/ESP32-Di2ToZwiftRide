@@ -1,4 +1,4 @@
-#include "../Di2ToOpenBikeControl/ConfigPortal.h"
+#include "../Di2ToZwiftRide/ConfigPortal.h"
 
 #include <cassert>
 #include <algorithm>

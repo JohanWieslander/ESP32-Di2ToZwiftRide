@@ -60,6 +60,8 @@ idle/unmapped `0xF0` releases a held action and re-arms the channel.
 
 ## Build and flash
 
+The Arduino sketch is `Di2ToZwiftRide/Di2ToZwiftRide.ino`.
+
 The project pins PlatformIO's Espressif32 platform to 6.10.0 (Arduino-ESP32
 2.0.17) and NimBLE-Arduino to 1.4.2. Install PlatformIO Core, connect the
 board by USB, then select the matching environment:
