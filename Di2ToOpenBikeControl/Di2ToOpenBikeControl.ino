@@ -7,42 +7,13 @@
 #include <deque>
 #include "Di2ChannelChanges.h"
 #include "ZwiftRideProtocol.h"
+#include "ButtonConfig.h"
+#include "ConfigPortal.h"
 
 static const uint32_t MOMENTARY_PRESS_MS = 80;
 
-enum ObcButton : uint8_t {
-  OBC_SHIFT_UP = 0x01,
-  OBC_SHIFT_DOWN = 0x02,
-  OBC_NAV_UP = 0x10,
-  OBC_NAV_DOWN = 0x11,
-  OBC_NAV_LEFT = 0x12,
-  OBC_NAV_RIGHT = 0x13,
-  OBC_SELECT = 0x14,
-  OBC_BACK = 0x15,
-  OBC_MENU = 0x16,
-  OBC_STEER_LEFT = 0x18,
-  OBC_STEER_RIGHT = 0x19,
-  OBC_EMOTE = 0x20,
-  OBC_SCREENSHOT = 0x24,
-  OBC_DIFF_UP = 0x30,
-  OBC_DIFF_DOWN = 0x31,
-  OBC_LAP = 0x35,
-  OBC_U_TURN = 0x37,
-  OBC_POWER_UP = 0x50,
-  OBC_NONE = 0x00,
-};
-
-struct ChannelMap {
-  uint8_t shortPress;
-  uint8_t longPress;
-  uint8_t doublePress;
-};
-
-static const ChannelMap CHANNEL_MAP[4] = {
-  { OBC_SHIFT_DOWN, OBC_POWER_UP, OBC_BACK },
-  { OBC_SHIFT_UP, OBC_EMOTE, OBC_SELECT },
-  { OBC_NAV_LEFT, OBC_STEER_LEFT, OBC_U_TURN },
-  { OBC_NAV_RIGHT, OBC_STEER_RIGHT, OBC_NAV_UP },
+static ChannelMap CHANNEL_MAP[4] = {
+  DEFAULT_CHANNEL_MAP[0], DEFAULT_CHANNEL_MAP[1], DEFAULT_CHANNEL_MAP[2], DEFAULT_CHANNEL_MAP[3]
 };
 
 static NimBLEUUID DI2_SERVICE_UUID("000018ef-5348-494d-414e-4f5f424c4500");
@@ -647,12 +618,14 @@ void setup() {
   scan->setActiveScan(true);
   scan->setInterval(45);
   scan->setWindow(30);
+  ConfigPortal::begin(CHANNEL_MAP);
   startZwiftRide();
   scan->start(0, nullptr, false);
   Serial.println("[BLE] scanning for Di2...");
 }
 
 void loop() {
+  ConfigPortal::handle();
   serviceZwiftRide();
   processBleEvents();
   servicePendingReleases();

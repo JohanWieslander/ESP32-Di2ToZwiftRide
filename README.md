@@ -3,7 +3,7 @@
 ESP32 firmware that reads Shimano Di2 D-Fly button indications over Bluetooth
 Low Energy and acts as a Zwift Ride controller. It supports virtual shifting,
 junction selection, steering, power-ups, Ride Ons and menu controls.
-All communication is over BLE; no network setup is required.
+Buttons are configured through an open Wi-Fi captive portal; no network setup is required.
 
 ## Hardware and setup
 
@@ -26,8 +26,14 @@ The ESP32 maintains the Di2 connection and the Zwift connection simultaneously.
 | CH4 | D-pad right - Junction right | Steer right | Action bar |
 
 These are Zwift's contextual Ride bindings, not keyboard shortcuts.
-Edit `CHANNEL_MAP` in `Di2ToOpenBikeControl/Di2ToOpenBikeControl.ino` to
-change the layout.
+To change the layout, join the open (passwordless) Wi-Fi network
+**Di2-Zwift-Bridge**. The captive portal opens automatically (or browse to
+`http://192.168.4.1`) with a simple page for choosing the action of each
+CH1-4 single, long and double press. Settings are saved to flash and apply
+immediately; "Save and close portal" saves and shuts the portal down, and
+"Restore defaults" resets the table above. The portal closes 30 seconds after boot if nobody has joined (reboot to
+reopen it). The network has no password, so anyone in Wi-Fi range can change
+the mapping while it is open.
 
 Single and double presses send an 80 ms button press. U-turn sends a two-second
 D-pad-down hold on the Ride output. Long presses stay active until Di2 reports
