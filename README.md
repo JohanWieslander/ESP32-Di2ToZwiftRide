@@ -36,32 +36,15 @@ Only one central is intended at a time; advertising resumes after disconnect.
 Device information requires an exchanged MTU of at least 42; an insufficient
 MTU is logged and disconnected rather than transmitting a truncated response.
 
-Build/flash commands are below. Wi-Fi is **off by default**; the Wi-Fi setup
-instructions apply only when building with `-DENABLE_WIFI_OBC=1`.
-
 Arduino sketch for an ESP32 that reads Shimano Di2 D-Fly button indications
-over BLE and advertises an OpenBikeControl TCP endpoint over Wi-Fi and mDNS.
+over BLE and sends Zwift Ride and OpenBikeControl button events over BLE.
 
 ## Hardware and setup
 
-- ESP32 classic, ESP32-S3, or ESP32-C3 board with Wi-Fi and BLE.
+- ESP32 classic, ESP32-S3, or ESP32-C3 board with BLE.
 - Shimano Di2 with an EW-WU111 wireless unit or built-in BLE.
 - Pair/bond the Di2 unit with the ESP32 before using it. Assign the physical
   buttons to D-Fly channels 1-4 in Shimano E-Tube Project.
-- Put the ESP32 and the OpenBikeControl app on the same Wi-Fi network.
-
-No Wi-Fi credentials need to be edited into the sketch. On first boot, the
-ESP32 starts an open setup network named `Di2-Bridge-XXXX`; no Wi-Fi password
-is needed to join it. Connect a phone or computer to that network and open
-the captive portal (or visit `http://192.168.4.1`), then submit the Wi-Fi SSID
-and password. The credentials are stored in ESP32 NVS and the bridge restarts
-to connect.
-
-The bridge advertises `_openbikecontrol._tcp.local.` on TCP port 8080 as
-**Di2 Bridge** after connecting to Wi-Fi. If it cannot connect within two minutes
-at boot, it keeps the saved credentials and starts the setup portal so you can update them;
-the credentials are replaced only when you submit new ones. If Wi-Fi is lost
-for 10 seconds while running, it restarts and retries the saved network.
 
 ## Default D-Fly mappings
 
@@ -101,10 +84,7 @@ versions.
 
 - This implementation has not been tested with physical Di2 or trainer
   hardware. A successful firmware build does not verify BLE pairing, D-Fly
-  indications, Wi-Fi, mDNS discovery, or trainer-app behavior.
+  indications or trainer-app behavior.
 - The bridge requires an indication-capable Di2 button characteristic and
   reports itself ready only after the indication subscription succeeds.
 - It ignores app-to-device haptic and app-information messages.
-- The open setup network allows nearby devices to join while provisioning.
-  The local setup page uses HTTP, so configure it only while connected to the
-  bridge's setup network.

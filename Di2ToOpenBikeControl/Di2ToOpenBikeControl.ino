@@ -1,8 +1,3 @@
-#include <WiFi.h>
-#include <ESPmDNS.h>
-#include <DNSServer.h>
-#include <WebServer.h>
-#include <Preferences.h>
 #include <NimBLEDevice.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -13,24 +8,7 @@
 #include "Di2ChannelChanges.h"
 #include "ZwiftRideProtocol.h"
 
-// Experimental unencrypted Zwift Ride peripheral. Wi-Fi OBC is optional.
-#ifndef ENABLE_WIFI_OBC
-#define ENABLE_WIFI_OBC 0
-#endif
-
-static const char* OBC_DEVICE_NAME = "Di2 Bridge";
-static const char* OBC_HOSTNAME = "di2bridge";
-static const char* WIFI_PREFERENCES_NAMESPACE = "di2bridge";
-static const char* WIFI_SSID_KEY = "ssid";
-static const char* WIFI_PASSWORD_KEY = "password";
-static const uint16_t OBC_TCP_PORT = 8080;
-static const char* OBC_MANUFACTURER = "DIY";
-static const char* OBC_MODEL = "ESP32-Di2-Bridge";
-static const uint8_t OBC_MAX_CLIENTS = 4;
 static const uint32_t MOMENTARY_PRESS_MS = 80;
-static const uint32_t STATUS_HEARTBEAT_MS = 30000;
-static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 120000;
-static const uint32_t WIFI_DISCONNECT_RESET_MS = 10000;
 
 enum ObcButton : uint8_t {
   OBC_SHIFT_UP = 0x01,
@@ -81,18 +59,9 @@ struct BleEvent {
 };
 
 static const uint8_t MSG_BUTTON_STATE = 0x01;
-static const uint8_t MSG_DEVICE_STATUS = 0x02;
 static const uint8_t STATE_RELEASED = 0x00;
 static const uint8_t STATE_PRESSED = 0x01;
 
-WiFiServer tcpServer(OBC_TCP_PORT);
-WiFiClient clients[OBC_MAX_CLIENTS];
-static DNSServer dnsServer;
-static WebServer portalServer(80);
-static Preferences wifiPreferences;
-static bool networkReady = false;
-static bool portalRunning = false;
-static uint32_t wifiDisconnectedAt = 0;
 static NimBLEClient* bleClient = nullptr;
 static NimBLERemoteCharacteristic* bleButton = nullptr;
 static QueueHandle_t bleEventQueue = nullptr;
@@ -109,7 +78,6 @@ struct PendingRelease {
 };
 
 static std::vector<PendingRelease> pendingReleases;
-static uint32_t lastHeartbeat = 0;
 
 
 // ---- Experimental Zwift Ride emulation (BLE peripheral) ----
@@ -422,27 +390,12 @@ static void startZwiftRide() {
   Serial.println("[Ride] experimental Zwift Ride advertising; OBC GATT service retained");
 }
 
-static void broadcast(const uint8_t* data, size_t len) {
-  for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
-    if (clients[i] && clients[i].connected()) {
-      clients[i].write(data, len);
-    }
-  }
-}
-
 static void sendButton(uint8_t buttonId, uint8_t state) {
   if (buttonId == OBC_NONE) return;
   uint8_t msg[3] = { MSG_BUTTON_STATE, buttonId, state };
-  broadcast(msg, sizeof(msg));
   notifyObcBle(msg, sizeof(msg));
   updateZwiftButton(buttonId, state);
   Serial.printf("[OBC] button 0x%02X state 0x%02X\n", buttonId, state);
-}
-
-static void sendDeviceStatus() {
-  uint8_t connected = di2Connected ? 0x01 : 0x00;
-  uint8_t msg[3] = { MSG_DEVICE_STATUS, 0xFF, connected };
-  broadcast(msg, sizeof(msg));
 }
 
 static void releasePendingButton(uint8_t buttonId) {
@@ -494,35 +447,6 @@ static void releaseAllButtons() {
   zwiftDownReleasePending = false;
   zwiftButtons.reset();
   sendZwiftInput();
-}
-
-static void manageTcpClients() {
-  WiFiClient incoming = tcpServer.available();
-  if (incoming) {
-    bool placed = false;
-    for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
-      if (!clients[i] || !clients[i].connected()) {
-        clients[i].stop();
-        clients[i] = incoming;
-        clients[i].setNoDelay(true);
-        placed = true;
-        Serial.printf("[OBC] client connected (slot %u)\n", i);
-        uint8_t msg[3] = { MSG_DEVICE_STATUS, 0xFF, (uint8_t)(di2Connected ? 0x01 : 0x00) };
-        clients[i].write(msg, sizeof(msg));
-        break;
-      }
-    }
-    if (!placed) {
-      Serial.println("[OBC] no free client slot, rejecting");
-      incoming.stop();
-    }
-  }
-
-  for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
-    if (clients[i] && clients[i].connected()) {
-      while (clients[i].available()) clients[i].read();
-    }
-  }
 }
 
 static PressType decodePress(uint8_t value) {
@@ -698,7 +622,6 @@ static bool connectToDi2(NimBLEAdvertisedDevice* device) {
 
   di2Connected = true;
   Serial.println("[BLE] Di2 bonded and subscribed; ready for D-Fly channel 1-4 input");
-  sendDeviceStatus();
   return true;
 }
 
@@ -714,147 +637,8 @@ static void processBleEvents() {
       bleButton = nullptr;
       di2Connected = false;
       releaseAllButtons();
-      sendDeviceStatus();
     }
   }
-}
-
-static void handleWifiPortalRoot() {
-  static const char page[] =
-      "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-      "<title>Di2 Bridge Wi-Fi</title></head><body><h1>Di2 Bridge Wi-Fi setup</h1>"
-      "<form method='post' action='/save'>"
-      "<label>Wi-Fi name (SSID)<br><input name='ssid' maxlength='32' required></label><br><br>"
-      "<label>Wi-Fi password<br><input name='password' type='password' maxlength='64'></label><br><br>"
-      "<button type='submit'>Save and connect</button></form></body></html>";
-  portalServer.send(200, "text/html", page);
-}
-
-static void redirectToWifiPortal() {
-  portalServer.sendHeader("Location", "/", true);
-  portalServer.send(302, "text/plain", "");
-}
-
-static void handleWifiPortalSave() {
-  if (!portalServer.hasArg("ssid") || !portalServer.hasArg("password")) {
-    portalServer.send(400, "text/plain", "SSID and password fields are required.");
-    return;
-  }
-
-  String ssid = portalServer.arg("ssid");
-  String password = portalServer.arg("password");
-  if (ssid.length() == 0 || ssid.length() > 32 ||
-      (password.length() != 0 && (password.length() < 8 || password.length() > 64))) {
-    portalServer.send(400, "text/plain", "SSID or password length is invalid.");
-    return;
-  }
-  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
-    portalServer.send(500, "text/plain", "Could not open Wi-Fi settings storage.");
-    return;
-  }
-
-  wifiPreferences.putString(WIFI_SSID_KEY, ssid);
-  wifiPreferences.putString(WIFI_PASSWORD_KEY, password);
-  bool credentialsStored = wifiPreferences.getString(WIFI_SSID_KEY, "") == ssid &&
-                          wifiPreferences.getString(WIFI_PASSWORD_KEY, "") == password;
-  wifiPreferences.end();
-  if (!credentialsStored) {
-    portalServer.send(500, "text/plain", "Could not save Wi-Fi settings.");
-    return;
-  }
-  portalServer.send(200, "text/html",
-                    "<!doctype html><html><body><p>Saved. The bridge is restarting and will connect to Wi-Fi.</p></body></html>");
-  delay(500);
-  ESP.restart();
-}
-
-static bool startWifiSetupPortal() {
-  WiFi.mode(WIFI_AP);
-  WiFi.setHostname(OBC_HOSTNAME);
-
-  char setupSsid[32];
-  uint64_t chipId = ESP.getEfuseMac();
-  snprintf(setupSsid, sizeof(setupSsid), "Di2-Bridge-%04X", static_cast<unsigned int>(chipId & 0xFFFF));
-  if (!WiFi.softAP(setupSsid, nullptr, 1, false, 1)) {
-    Serial.println("[WiFi] could not start setup access point");
-    return false;
-  }
-
-  IPAddress portalIp = WiFi.softAPIP();
-  if (!dnsServer.start(53, "*", portalIp)) {
-    Serial.println("[WiFi] captive DNS failed; open http://192.168.4.1 manually");
-  }
-  portalServer.on("/", HTTP_GET, handleWifiPortalRoot);
-  portalServer.on("/save", HTTP_POST, handleWifiPortalSave);
-  portalServer.onNotFound(redirectToWifiPortal);
-  portalServer.begin();
-  portalRunning = true;
-  Serial.printf("[WiFi] setup network: %s\n", setupSsid);
-  Serial.printf("[WiFi] open http://%s to configure network access\n", portalIp.toString().c_str());
-  return true;
-}
-
-static bool startWifiAndMdns() {
-  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
-    Serial.println("[WiFi] could not open settings storage; starting setup portal");
-    if (!startWifiSetupPortal()) {
-      delay(1000);
-      ESP.restart();
-    }
-    return false;
-  }
-  String ssid = wifiPreferences.isKey(WIFI_SSID_KEY)
-                    ? wifiPreferences.getString(WIFI_SSID_KEY, "")
-                    : "";
-  String password = wifiPreferences.isKey(WIFI_PASSWORD_KEY)
-                        ? wifiPreferences.getString(WIFI_PASSWORD_KEY, "")
-                        : "";
-  wifiPreferences.end();
-
-  if (ssid.isEmpty()) {
-    Serial.println("[WiFi] no saved network; starting setup portal");
-    if (!startWifiSetupPortal()) {
-      delay(1000);
-      ESP.restart();
-    }
-    return false;
-  }
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(OBC_HOSTNAME);
-  WiFi.begin(ssid.c_str(), password.c_str());
-  Serial.printf("[WiFi] connecting to %s", ssid.c_str());
-  uint32_t startedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(250);
-    Serial.print('.');
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n[WiFi] connection timed out; keeping saved network and starting setup portal");
-    if (!startWifiSetupPortal()) {
-      delay(1000);
-      ESP.restart();
-    }
-    return false;
-  }
-
-  Serial.printf("\n[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
-  tcpServer.begin();
-  tcpServer.setNoDelay(true);
-  if (!MDNS.begin(OBC_HOSTNAME)) {
-    Serial.println("[mDNS] start failed; TCP server is available only by IP");
-  } else {
-    MDNS.addService("openbikecontrol", "tcp", OBC_TCP_PORT);
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "version", "1");
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "id", WiFi.macAddress());
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "name", OBC_DEVICE_NAME);
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "service-uuids", "d273f680-d548-419d-b9d1-fa0472345229");
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "manufacturer", OBC_MANUFACTURER);
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "model", OBC_MODEL);
-    Serial.printf("[mDNS] _openbikecontrol._tcp on port %u\n", OBC_TCP_PORT);
-  }
-  networkReady = true;
-  return true;
 }
 
 void setup() {
@@ -870,12 +654,6 @@ void setup() {
     delay(1000);
     ESP.restart();
   }
-
-#if ENABLE_WIFI_OBC
-  if (!startWifiAndMdns()) return;
-#else
-  networkReady = true;
-#endif
 
   NimBLEDevice::init("Zwift Ride");
   int mtuResult = NimBLEDevice::setMTU(185);
@@ -894,28 +672,6 @@ void setup() {
 }
 
 void loop() {
-  if (!networkReady) {
-    if (portalRunning) {
-      dnsServer.processNextRequest();
-      portalServer.handleClient();
-    }
-    delay(2);
-    return;
-  }
-
-#if ENABLE_WIFI_OBC
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiDisconnectedAt = 0;
-  } else if (wifiDisconnectedAt == 0) {
-    wifiDisconnectedAt = millis();
-  } else if (millis() - wifiDisconnectedAt >= WIFI_DISCONNECT_RESET_MS) {
-    Serial.println("[WiFi] connection lost; restarting");
-    delay(500);
-    ESP.restart();
-  }
-  manageTcpClients();
-#endif
-
   serviceZwiftRide();
   processBleEvents();
   servicePendingReleases();
@@ -931,10 +687,5 @@ void loop() {
     scan->start(0, nullptr, false);
   }
 
-  uint32_t now = millis();
-  if (now - lastHeartbeat >= STATUS_HEARTBEAT_MS) {
-    lastHeartbeat = now;
-    sendDeviceStatus();
-  }
   delay(1);
 }
