@@ -37,6 +37,10 @@ These are firmware defaults; edit `CHANNEL_MAP` in the sketch to change them.
 Short and double presses are sent as 80 ms momentary presses. Long presses
 remain pressed until Di2 reports release.
 
+The first Di2 indication after each connection establishes the channel baseline
+without triggering actions. Later indications trigger actions only for channels
+whose raw value changed; the serial monitor logs the complete indication.
+
 ## Build and flash
 
 The project pins PlatformIO's Espressif32 platform to 6.10.0 (Arduino-ESP32

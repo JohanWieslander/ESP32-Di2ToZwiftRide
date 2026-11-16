@@ -9,6 +9,7 @@
 #include <cstring>
 #include <new>
 #include <vector>
+#include "Di2ChannelChanges.h"
 
 // Zwift cannot use mDNS/TCP, so by default the bridge emulates a Zwift Click
 // over BLE. Build with -DENABLE_WIFI_OBC=1 to use the Wi-Fi OpenBikeControl endpoint instead.
@@ -96,6 +97,7 @@ static QueueHandle_t bleEventQueue = nullptr;
 static portMUX_TYPE discoveredDeviceMux = portMUX_INITIALIZER_UNLOCKED;
 static NimBLEAdvertisedDevice* discoveredDevice = nullptr;
 static bool di2Connected = false;
+static Di2ChannelChanges di2ChannelChanges;
 static PressType lastPress[4] = { PRESS_NONE, PRESS_NONE, PRESS_NONE, PRESS_NONE };
 static uint8_t heldButton[4] = { OBC_NONE, OBC_NONE, OBC_NONE, OBC_NONE };
 
@@ -273,6 +275,7 @@ static void servicePendingReleases() {
 }
 
 static void releaseAllButtons() {
+  di2ChannelChanges.reset();
   for (const PendingRelease& pending : pendingReleases) {
     sendButton(pending.buttonId, STATE_RELEASED);
   }
@@ -339,16 +342,17 @@ static void handleDi2Data(const uint8_t* data, size_t len) {
   size_t channels = len - 1;
   if (channels > 4) channels = 4;
 
+  Serial.print("[Di2] raw:");
+  for (size_t i = 0; i < len; i++) Serial.printf(" %02X", data[i]);
+  Serial.println();
+  uint8_t changed = di2ChannelChanges.update(data, len);
   for (size_t idx = 0; idx < channels; idx++) {
+    if (!(changed & (1U << idx))) continue;
     uint8_t raw = data[idx + 1];
-    if (raw == DI2_UNMAPPED) continue;
 
     PressType press = decodePress(raw);
     PressType previous = lastPress[idx];
     Serial.printf("[Di2] ch%u raw 0x%02X\n", (unsigned)(idx + 1), raw);
-    // Each short/double indication is a distinct press even if Di2 sends no release in between.
-    bool momentary = press == PRESS_SHORT || press == PRESS_DOUBLE;
-    if (press == previous && !momentary) continue;
 
     if (previous == PRESS_LONG && press != PRESS_LONG) {
       sendButton(heldButton[idx], STATE_RELEASED);
@@ -357,7 +361,7 @@ static void handleDi2Data(const uint8_t* data, size_t len) {
 
     if (press == PRESS_SHORT || press == PRESS_DOUBLE) {
       fireMomentary(mapButton(idx, press));
-    } else if (press == PRESS_LONG) {
+    } else if (press == PRESS_LONG && previous != PRESS_LONG) {
       uint8_t button = mapButton(idx, PRESS_LONG);
       heldButton[idx] = button;
       sendButton(button, STATE_PRESSED);
