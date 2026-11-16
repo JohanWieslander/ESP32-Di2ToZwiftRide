@@ -1,4 +1,4 @@
-#include "../Di2ToOpenBikeControl/ZwiftRideProtocol.h"
+#include "../Di2ToZwiftRide/ZwiftRideProtocol.h"
 
 #include <assert.h>
 
