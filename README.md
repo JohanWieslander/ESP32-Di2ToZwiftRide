@@ -17,22 +17,21 @@ compatibility with Zwift; this branch is for manual testing.
 
 | D-Fly channel | Short press in Zwift | Long press in Zwift | Double press in Zwift |
 |---|---|---|---|
-| CH1 | Shift up | Raise workout intensity / shift up outside workouts | Select |
-| CH2 | Shift down | Lower workout intensity / shift down outside workouts | Back/menu |
-| CH3 | Action bar | Back/menu | Ride On |
-| CH4 | U-turn (sends a 2-second hold) | Unsupported (Screenshot) | Unsupported (Lap) |
+| CH1 | Shift up | B (Back/menu) | A (Select) |
+| CH2 | Shift down | A (Select) | B (Back/menu) |
+| CH3 | D-pad left (junction left) | Z (Ride On; hold for bomb) | Z (Ride On) |
+| CH4 | D-pad right (junction right) | Y (Use power-up) | Unsupported (Lap) |
 
 These are Zwift's contextual Ride bindings, not arbitrary keyboard commands.
-CH3/CH4 short presses use action bar/U-turn instead of generic up/down.
-Long intensity presses use the same Ride keys as shifting; Zwift determines
-their effect and repeat behavior. A double press emits a single momentary
-Ride button event. No screenshot or lap command is invented.
+CH3/CH4 short presses select junction turns, not analog road steering.
+Long presses keep the corresponding Ride key held until Di2 reports release.
+A double press emits a single momentary Ride button event.
+No lap command is invented.
 
 The existing OBC GATT service and action IDs are retained, but its service UUID
 is no longer advertised: Ride discovery fills the primary advertising packet.
 Apps that require OBC UUID-based discovery may not find this experimental build.
-The CH4 short press is held for two seconds on the Ride output only; OBC
-short/double presses retain their 80 ms duration. Haptics are logged but not executed.
+Short/double presses retain their 80 ms duration. Haptics are logged but not executed.
 Only one central is intended at a time; advertising resumes after disconnect.
 Device information requires an exchanged MTU of at least 42; an insufficient
 MTU is logged and disconnected rather than transmitting a truncated response.
@@ -68,14 +67,13 @@ for 10 seconds while running, it restarts and retries the saved network.
 
 | D-Fly channel | Short press | Long press | Double press |
 |---|---|---|---|
-| CH1 | Shift up | Increase difficulty | Select/confirm |
-| CH2 | Shift down | Decrease difficulty | Back/cancel |
-| CH3 | Navigate up | Menu | Emote |
-| CH4 | Navigate down | Screenshot | Lap |
+| CH1 | Shift up | Back/cancel | Select/confirm |
+| CH2 | Shift down | Select/confirm | Back/cancel |
+| CH3 | Navigate left | Emote | Emote |
+| CH4 | Navigate right | Power-up 1 | Lap |
 
 These are firmware defaults; edit `CHANNEL_MAP` in the sketch to change them.
-Short and double presses are sent as 80 ms momentary presses over OBC (the
-experimental Ride output extends CH4 for U-turn as described above). Long presses
+Short and double presses are sent as 80 ms momentary presses. Long presses
 remain pressed until Di2 reports release.
 
 The first Di2 indication after each connection establishes the channel baseline

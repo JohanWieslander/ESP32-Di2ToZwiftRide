@@ -121,7 +121,7 @@ inline bool getResponse(uint32_t object, Bytes& out) {
 
 enum class Action : uint8_t {
   ShiftUp, ShiftDown, IntensityUp, IntensityDown, Up, Down, Left, Right,
-  Select, Back, Menu, Emote
+  Select, Back, Menu, Emote, PowerUp
 };
 
 class Buttons {
@@ -139,15 +139,15 @@ class Buttons {
 
   uint32_t released() const {
     uint32_t value = UINT32_MAX;
-    for (uint8_t action = 0; action < 12; ++action) {
+    for (uint8_t action = 0; action <= static_cast<uint8_t>(Action::PowerUp); ++action) {
       if (active_ & (uint32_t(1) << action)) value &= ~(uint32_t(1) << key(action));
     }
     return value;
   }
 
   static uint8_t key(uint8_t action) {
-    // Shift +/-, intensity +/-, up/down/left/right, select/back/menu/emote.
-    static const uint8_t keys[] = {12, 8, 12, 8, 1, 3, 0, 2, 4, 5, 5, 7};
+    // Shift +/-, intensity +/-, up/down/left/right, A/B/B/Z/Y.
+    static const uint8_t keys[] = {12, 8, 12, 8, 1, 3, 0, 2, 4, 5, 5, 7, 6};
     return keys[action];
   }
 

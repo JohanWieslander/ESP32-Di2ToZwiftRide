@@ -47,6 +47,7 @@ enum ObcButton : uint8_t {
   OBC_DIFF_UP = 0x30,
   OBC_DIFF_DOWN = 0x31,
   OBC_LAP = 0x35,
+  OBC_POWER_UP = 0x50,
   OBC_NONE = 0x00,
 };
 
@@ -57,10 +58,10 @@ struct ChannelMap {
 };
 
 static const ChannelMap CHANNEL_MAP[4] = {
-  { OBC_SHIFT_UP, OBC_DIFF_UP, OBC_SELECT },
-  { OBC_SHIFT_DOWN, OBC_DIFF_DOWN, OBC_BACK },
-  { OBC_NAV_UP, OBC_MENU, OBC_EMOTE },
-  { OBC_NAV_DOWN, OBC_SCREENSHOT, OBC_LAP },
+  { OBC_SHIFT_UP, OBC_BACK, OBC_SELECT },
+  { OBC_SHIFT_DOWN, OBC_SELECT, OBC_BACK },
+  { OBC_NAV_LEFT, OBC_EMOTE, OBC_EMOTE },
+  { OBC_NAV_RIGHT, OBC_POWER_UP, OBC_LAP },
 };
 
 static NimBLEUUID DI2_SERVICE_UUID("000018ef-5348-494d-414e-4f5f424c4500");
@@ -194,6 +195,7 @@ static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
     case OBC_BACK: action = ZwiftRide::Action::Back; break;
     case OBC_MENU: action = ZwiftRide::Action::Menu; break;
     case OBC_EMOTE: action = ZwiftRide::Action::Emote; break;
+    case OBC_POWER_UP: action = ZwiftRide::Action::PowerUp; break;
     default:
       if (state == STATE_PRESSED) {
         Serial.printf("[Ride] OBC action 0x%02X has no Ride mapping (OBC output retained)\n", buttonId);

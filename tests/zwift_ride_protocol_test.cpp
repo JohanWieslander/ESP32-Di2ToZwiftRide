@@ -20,6 +20,21 @@ int main() {
   buttons.reset();
   assert(buttons.released() == UINT32_MAX);
 
+  const Action controls[] = {Action::Left, Action::Right, Action::Back,
+                             Action::Select, Action::Emote, Action::PowerUp};
+  const uint8_t keyBits[] = {0, 2, 5, 4, 7, 6};
+  for (size_t i = 0; i < sizeof(keyBits); ++i) {
+    assert(buttons.update(controls[i], true));
+    assert(buttons.released() == (UINT32_MAX & ~(1U << keyBits[i])));
+    assert(buttons.update(controls[i], false));
+    assert(buttons.released() == UINT32_MAX);
+  }
+  buttons.update(Action::ShiftDown, true);
+  buttons.update(Action::PowerUp, true);
+  buttons.update(Action::PowerUp, false);
+  assert(buttons.released() == (UINT32_MAX & ~(1U << 8)));
+  buttons.reset();
+
   uint32_t object = 0;
   Bytes get{0x08, 0x80, 0x08};
   assert(getObjectId(get.data(), get.size(), object) && object == 0x0400);
