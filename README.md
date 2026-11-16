@@ -1,77 +1,69 @@
-# Di2 to OpenBikeControl bridge
+# Di2 to Zwift Ride BLE bridge
 
-## Experimental Zwift Ride branch
-
-This branch replaces the two-button Click emulation with an **experimental,
-unencrypted Zwift Ride** controller. The original Click branch is unchanged.
-After flashing, remove the old Click pairing in Zwift and pair **Zwift Ride**
-under **Controls**. Watch the serial monitor for `central connected`,
-`negotiated MTU`, `handshake`, and `GET object` messages.
-
-The protocol implementation follows the wire format of the
-[Zwift Joypad reference](https://github.com/rainyx/zwift-joypad-android).
-It advertises a Ride user-input capability, answers device/input/battery queries,
-and sends digital buttons and analog steering paddles with a one-second keepalive.
-It does **not** implement encryption. Successful builds do not verify
-compatibility with Zwift; this branch is for manual testing.
-
-| D-Fly channel | Short press in Zwift | Long press in Zwift | Double press in Zwift |
-|---|---|---|---|
-| CH1 | Shift down | Y (Use power-up) | B (Back/menu) |
-| CH2 | Shift up | Z (Ride On; hold for bomb) | A (Select) |
-| CH3 | D-pad left (junction left) | Steer left | U-turn (2-second D-pad-down hold) |
-| CH4 | D-pad right (junction right) | Steer right | Action bar |
-
-These are Zwift's contextual Ride bindings, not arbitrary keyboard commands.
-CH3/CH4 short presses select junction turns, not analog road steering.
-Long presses keep the corresponding Ride key held until Di2 reports release.
-CH3/CH4 long presses send full paddle deflection: left horizontal
-axis -100 or right horizontal axis +100, matching the reference app's
-steering (not braking) direction. Release returns that paddle to zero;
-Di2 disconnect resets both paddles. Simultaneous holds report both paddles.
-Steering strength and Zwift's response still need manual testing.
-A double press emits a single momentary Ride button event, except CH3,
-which holds D-pad down for two seconds to trigger U-turn.
-CH4 uses Action bar instead of Coffee Break, for which there is no verified
-direct Ride button mapping.
-
-The existing OBC GATT service and action IDs are retained, but its service UUID
-is no longer advertised: Ride discovery fills the primary advertising packet.
-Apps that require OBC UUID-based discovery may not find this experimental build.
-Short/double presses retain their 80 ms duration except the Ride U-turn hold.
-Haptics are logged but not executed.
-Only one central is intended at a time; advertising resumes after disconnect.
-Device information requires an exchanged MTU of at least 42; an insufficient
-MTU is logged and disconnected rather than transmitting a truncated response.
-
-Arduino sketch for an ESP32 that reads Shimano Di2 D-Fly button indications
-over BLE and sends Zwift Ride and OpenBikeControl button events over BLE.
+ESP32 firmware that reads Shimano Di2 D-Fly button indications over Bluetooth
+Low Energy and acts as a Zwift Ride controller. It supports virtual shifting,
+junction selection, steering, power-ups, Ride Ons and menu controls.
+All communication is over BLE; no network setup is required.
 
 ## Hardware and setup
 
 - ESP32 classic, ESP32-S3, or ESP32-C3 board with BLE.
 - Shimano Di2 with an EW-WU111 wireless unit or built-in BLE.
-- Pair/bond the Di2 unit with the ESP32 before using it. Assign the physical
-  buttons to D-Fly channels 1-4 in Shimano E-Tube Project.
+- Assign the physical buttons to D-Fly channels 1-4 in Shimano E-Tube Project.
 
-## Default D-Fly mappings
+Flash the firmware and power on Di2. The bridge scans for the Shimano service,
+connects, establishes a secure/bonded connection and subscribes to D-Fly
+indications. In Zwift, pair **Zwift Ride** under **Controls**.
+The ESP32 maintains the Di2 connection and the Zwift connection simultaneously.
 
-| D-Fly channel | Short press | Long press | Double press |
+## Button layout
+
+| D-Fly channel | Single press | Long press | Double press |
 |---|---|---|---|
-| CH1 | Shift down | Power-up 1 | Back/cancel |
-| CH2 | Shift up | Emote | Select/confirm |
-| CH3 | Navigate left | Steer left | U-turn |
-| CH4 | Navigate right | Steer right | Navigate up (Action bar in Ride) |
+| CH1 | Shift down | Y - Use power-up | B - Back/menu |
+| CH2 | Shift up | Z - Ride On (hold for bomb) | A - Select |
+| CH3 | D-pad left - Junction left | Steer left | U-turn |
+| CH4 | D-pad right - Junction right | Steer right | Action bar |
 
-These are firmware defaults; edit `CHANNEL_MAP` in the sketch to change them.
-Short and double presses are sent as 80 ms momentary presses over OBC.
-The Ride output extends U-turn to a two-second hold. Long presses
-remain pressed until Di2 reports release.
+These are Zwift's contextual Ride bindings, not keyboard shortcuts.
+Edit `CHANNEL_MAP` in `Di2ToOpenBikeControl/Di2ToOpenBikeControl.ino` to
+change the layout.
 
-The first Di2 indication after each connection establishes the channel baseline
-without triggering actions. Later indications trigger actions only for channels
-whose raw value changed. An idle or unmapped `0xF0` value releases a held
-button and re-arms the channel. The serial monitor logs the complete indication.
+Single and double presses send an 80 ms button press. U-turn sends a two-second
+D-pad-down hold on the Ride output. Long presses stay active until Di2 reports
+release.
+
+Steering uses the Ride analog paddles: CH3 holds the left horizontal axis at
+-100, and CH4 holds the right horizontal axis at +100. Releasing a button
+returns its paddle to zero. Both paddles can be held simultaneously.
+Di2 disconnect releases all buttons and resets steering to neutral.
+
+## BLE behavior
+
+The bridge advertises as **Zwift Ride**, using the unencrypted Ride protocol
+version 2.4. It answers device information, input configuration and battery
+queries, and sends button/paddle reports with a one-second keepalive.
+Battery queries report a fixed 100%, not a measured Di2 battery level.
+Advertising resumes after the central disconnects; one central is intended
+at a time.
+
+The Di2 input format is `[counter, ch1, ch2, ch3, ch4]`. The first indication
+after connection establishes a baseline without triggering actions. Subsequent
+actions are dispatched only when a raw channel byte changes. A transition to
+idle/unmapped `0xF0` releases a held action and re-arms the channel.
+
+An OpenBikeControl BLE GATT service is also available:
+
+- Service: `d273f680-d548-419d-b9d1-fa0472345229`
+- Button state (read/notify): `d273f681-d548-419d-b9d1-fa0472345229`
+- Haptics (write): `d273f682-d548-419d-b9d1-fa0472345229`
+- App information (write): `d273f683-d548-419d-b9d1-fa0472345229`
+
+OBC button events use `[0x01, button ID, state]`, with 80 ms single/double
+presses, including U-turn. The OBC service UUID is not advertised because
+the primary advertising packet is used for Ride discovery. Apps filtering
+by the OBC service UUID may not find the bridge. OBC haptic and app-information
+writes are accepted but not acted on.
 
 ## Build and flash
 
@@ -79,21 +71,41 @@ The project pins PlatformIO's Espressif32 platform to 6.10.0 (Arduino-ESP32
 2.0.17) and NimBLE-Arduino to 1.4.2. Install PlatformIO Core, connect the
 board by USB, then select the matching environment:
 
+| Board | Environment |
+|---|---|
+| ESP32 classic | `esp32dev` |
+| ESP32-S3 | `esp32-s3-devkitc-1` |
+| ESP32-C3 | `esp32-c3-devkitm-1` |
+
 ```sh
 pio run -e esp32dev
 pio run -e esp32dev -t upload
 pio device monitor -e esp32dev
 ```
 
-For ESP32-S3 use `esp32-s3-devkitc-1`; for ESP32-C3 use
-`esp32-c3-devkitm-1`. The environments pin the same framework and library
-versions.
+Replace `esp32dev` with your board's environment. Run `pio run` to build
+all three environments.
 
-## Limitations
+## Diagnostics and limitations
 
-- This implementation has not been tested with physical Di2 or trainer
-  hardware. A successful firmware build does not verify BLE pairing, D-Fly
-  indications or trainer-app behavior.
-- The bridge requires an indication-capable Di2 button characteristic and
-  reports itself ready only after the indication subscription succeeds.
-- It ignores app-to-device haptic and app-information messages.
+The serial monitor runs at 115200 baud. It logs Di2 connection/subscription
+status, complete input packets, mapped button events, the Ride handshake,
+negotiated MTU and object queries.
+
+- Shifting and steering have been reported working with Zwift on hardware.
+  The complete current layout and every supported board are not yet verified
+  on hardware.
+- Di2 must provide an indication-capable button characteristic; the bridge
+  reports readiness only after subscription succeeds.
+- The Ride protocol is unencrypted; encrypted controller modes are not
+  implemented.
+- Device information requires a negotiated MTU of at least 42. The firmware
+  requests 185 and disconnects with a log message if a response cannot fit,
+  rather than sending truncated data.
+- Ride haptic/game-state commands are logged but not acted on.
+- There are no direct Ride mappings for Screenshot, Lap or Coffee Break.
+
+The Ride wire format follows the
+[Zwift Joypad reference implementation](https://github.com/rainyx/zwift-joypad-android).
+Di2 input handling is based on the
+[Di2 media controls service](https://github.com/NitorCreations/shimano-di2-media-controls).
