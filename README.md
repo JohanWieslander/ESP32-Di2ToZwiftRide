@@ -1,5 +1,45 @@
 # Di2 to OpenBikeControl bridge
 
+## Experimental Zwift Ride branch
+
+This branch replaces the two-button Click emulation with an **experimental,
+unencrypted Zwift Ride** controller. The original Click branch is unchanged.
+After flashing, remove the old Click pairing in Zwift and pair **Zwift Ride**
+under **Controls**. Watch the serial monitor for `central connected`,
+`negotiated MTU`, `handshake`, and `GET object` messages.
+
+The protocol implementation follows the wire format of the
+[Zwift Joypad reference](https://github.com/rainyx/zwift-joypad-android).
+It advertises a Ride user-input capability, answers device/input/battery queries,
+and sends digital button reports with a one-second keepalive. It does **not**
+implement encryption or analog steering. Successful builds do not verify
+compatibility with Zwift; this branch is for manual testing.
+
+| D-Fly channel | Short press in Zwift | Long press in Zwift | Double press in Zwift |
+|---|---|---|---|
+| CH1 | Shift up | Raise workout intensity / shift up outside workouts | Select |
+| CH2 | Shift down | Lower workout intensity / shift down outside workouts | Back/menu |
+| CH3 | Action bar | Back/menu | Ride On |
+| CH4 | U-turn (sends a 2-second hold) | Unsupported (Screenshot) | Unsupported (Lap) |
+
+These are Zwift's contextual Ride bindings, not arbitrary keyboard commands.
+CH3/CH4 short presses use action bar/U-turn instead of generic up/down.
+Long intensity presses use the same Ride keys as shifting; Zwift determines
+their effect and repeat behavior. A double press emits a single momentary
+Ride button event. No screenshot or lap command is invented.
+
+The existing OBC GATT service and action IDs are retained, but its service UUID
+is no longer advertised: Ride discovery fills the primary advertising packet.
+Apps that require OBC UUID-based discovery may not find this experimental build.
+The CH4 short press is held for two seconds on the Ride output only; OBC
+short/double presses retain their 80 ms duration. Haptics are logged but not executed.
+Only one central is intended at a time; advertising resumes after disconnect.
+Device information requires an exchanged MTU of at least 42; an insufficient
+MTU is logged and disconnected rather than transmitting a truncated response.
+
+Build/flash commands are below. Wi-Fi is **off by default**; the Wi-Fi setup
+instructions apply only when building with `-DENABLE_WIFI_OBC=1`.
+
 Arduino sketch for an ESP32 that reads Shimano Di2 D-Fly button indications
 over BLE and advertises an OpenBikeControl TCP endpoint over Wi-Fi and mDNS.
 
@@ -34,7 +74,8 @@ for 10 seconds while running, it restarts and retries the saved network.
 | CH4 | Navigate down | Screenshot | Lap |
 
 These are firmware defaults; edit `CHANNEL_MAP` in the sketch to change them.
-Short and double presses are sent as 80 ms momentary presses. Long presses
+Short and double presses are sent as 80 ms momentary presses over OBC (the
+experimental Ride output extends CH4 for U-turn as described above). Long presses
 remain pressed until Di2 reports release.
 
 The first Di2 indication after each connection establishes the channel baseline
