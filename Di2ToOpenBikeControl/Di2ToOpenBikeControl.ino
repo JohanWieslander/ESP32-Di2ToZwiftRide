@@ -10,6 +10,12 @@
 #include <new>
 #include <vector>
 
+// Zwift cannot use mDNS/TCP, so by default the bridge emulates a Zwift Click
+// over BLE. Build with -DENABLE_WIFI_OBC=1 to use the Wi-Fi OpenBikeControl endpoint instead.
+#ifndef ENABLE_WIFI_OBC
+#define ENABLE_WIFI_OBC 0
+#endif
+
 static const char* OBC_DEVICE_NAME = "Di2 Bridge";
 static const char* OBC_HOSTNAME = "di2bridge";
 static const char* WIFI_PREFERENCES_NAMESPACE = "di2bridge";
@@ -101,6 +107,116 @@ struct PendingRelease {
 static std::vector<PendingRelease> pendingReleases;
 static uint32_t lastHeartbeat = 0;
 
+
+// ---- Zwift Click emulation (BLE peripheral) ----
+static NimBLEUUID ZWIFT_SERVICE_UUID("0000fc82-0000-1000-8000-00805f9b34fb");
+static const char* ZWIFT_ASYNC_UUID = "00000002-19ca-4651-86e5-fa29dcdd09d1";
+static const char* ZWIFT_SYNC_RX_UUID = "00000003-19ca-4651-86e5-fa29dcdd09d1";
+static const char* ZWIFT_SYNC_TX_UUID = "00000004-19ca-4651-86e5-fa29dcdd09d1";
+static const uint8_t ZWIFT_RIDE_ON[] = { 'R', 'i', 'd', 'e', 'O', 'n' };
+static const uint8_t ZWIFT_MSG_CLICK_STATE = 0x37;
+static const uint8_t ZWIFT_PRESSED = 0x00;
+static const uint8_t ZWIFT_RELEASED = 0x01;
+static NimBLECharacteristic* zwiftAsync = nullptr;
+static NimBLECharacteristic* zwiftSyncTx = nullptr;
+static bool zwiftConnected = false;
+static bool zwiftPlus = false;
+static bool zwiftMinus = false;
+
+static void sendZwiftClick() {
+  if (zwiftAsync == nullptr || !zwiftConnected) return;
+  uint8_t msg[5] = { ZWIFT_MSG_CLICK_STATE, 0x08, (uint8_t)(zwiftPlus ? ZWIFT_PRESSED : ZWIFT_RELEASED),
+                     0x10, (uint8_t)(zwiftMinus ? ZWIFT_PRESSED : ZWIFT_RELEASED) };
+  zwiftAsync->setValue(msg, sizeof(msg));
+  zwiftAsync->notify();
+}
+
+// ---- OpenBikeControl BLE transport (for BikeControl and other OBC apps) ----
+static NimBLEUUID OBC_BLE_SERVICE_UUID("d273f680-d548-419d-b9d1-fa0472345229");
+static const char* OBC_BLE_BUTTON_UUID = "d273f681-d548-419d-b9d1-fa0472345229";
+static const char* OBC_BLE_HAPTIC_UUID = "d273f682-d548-419d-b9d1-fa0472345229";
+static const char* OBC_BLE_APPINFO_UUID = "d273f683-d548-419d-b9d1-fa0472345229";
+static NimBLECharacteristic* obcBleButton = nullptr;
+static bool obcBleConnected = false;
+
+static void notifyObcBle(const uint8_t* msg, size_t len) {
+  if (obcBleButton == nullptr || !obcBleConnected) return;
+  obcBleButton->setValue(msg, len);
+  obcBleButton->notify();
+}
+
+static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
+  bool pressed = state == STATE_PRESSED;
+  if (buttonId == OBC_SHIFT_UP) zwiftPlus = pressed;
+  else if (buttonId == OBC_SHIFT_DOWN) zwiftMinus = pressed;
+  else return;
+  sendZwiftClick();
+}
+
+class ZwiftServerCB : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer*) override {
+    zwiftConnected = true;
+    obcBleConnected = true;
+    Serial.println("[BLE] central connected");
+    NimBLEDevice::getAdvertising()->start();
+  }
+  void onDisconnect(NimBLEServer*) override {
+    zwiftConnected = false;
+    obcBleConnected = false;
+    zwiftPlus = zwiftMinus = false;
+    Serial.println("[BLE] central disconnected; advertising again");
+    NimBLEDevice::getAdvertising()->start();
+  }
+};
+
+class ZwiftSyncRxCB : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c) override {
+    std::string value = c->getValue();
+    if (value.size() >= sizeof(ZWIFT_RIDE_ON) &&
+        memcmp(value.data(), ZWIFT_RIDE_ON, sizeof(ZWIFT_RIDE_ON)) == 0) {
+      const uint8_t reply[] = { 'R', 'i', 'd', 'e', 'O', 'n', 0x01, 0x03 };
+      zwiftSyncTx->setValue(reply, sizeof(reply));
+      zwiftSyncTx->indicate();
+      Serial.println("[Zwift] RideOn handshake");
+    }
+  }
+};
+
+static ZwiftServerCB zwiftServerCB;
+static ZwiftSyncRxCB zwiftSyncRxCB;
+
+static void startZwiftClick() {
+  NimBLEServer* server = NimBLEDevice::createServer();
+  server->setCallbacks(&zwiftServerCB);
+  NimBLEService* service = server->createService(ZWIFT_SERVICE_UUID);
+  zwiftAsync = service->createCharacteristic(ZWIFT_ASYNC_UUID, NIMBLE_PROPERTY::NOTIFY);
+  NimBLECharacteristic* rx = service->createCharacteristic(
+      ZWIFT_SYNC_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  rx->setCallbacks(&zwiftSyncRxCB);
+  zwiftSyncTx = service->createCharacteristic(ZWIFT_SYNC_TX_UUID, NIMBLE_PROPERTY::INDICATE);
+  service->start();
+
+  NimBLEService* obcService = server->createService(OBC_BLE_SERVICE_UUID);
+  obcBleButton = obcService->createCharacteristic(
+      OBC_BLE_BUTTON_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  obcService->createCharacteristic(OBC_BLE_HAPTIC_UUID,
+                                   NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  obcService->createCharacteristic(OBC_BLE_APPINFO_UUID,
+                                   NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  obcService->start();
+
+  // Zwift manufacturer id 0x094A (little endian) + Click device type 0x09
+  std::string mfg("\x4A\x09\x09", 3);
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(ZWIFT_SERVICE_UUID);
+  adv->addServiceUUID(OBC_BLE_SERVICE_UUID);
+  adv->setScanResponse(true);
+  adv->setManufacturerData(mfg);
+  adv->setName("Zwift Di2-Click");
+  adv->start();
+  Serial.println("[BLE] advertising Zwift Click + OpenBikeControl services");
+}
+
 static void broadcast(const uint8_t* data, size_t len) {
   for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
     if (clients[i] && clients[i].connected()) {
@@ -113,6 +229,8 @@ static void sendButton(uint8_t buttonId, uint8_t state) {
   if (buttonId == OBC_NONE) return;
   uint8_t msg[3] = { MSG_BUTTON_STATE, buttonId, state };
   broadcast(msg, sizeof(msg));
+  notifyObcBle(msg, sizeof(msg));
+  updateZwiftButton(buttonId, state);
   Serial.printf("[OBC] button 0x%02X state 0x%02X\n", buttonId, state);
 }
 
@@ -535,7 +653,11 @@ void setup() {
     ESP.restart();
   }
 
+#if ENABLE_WIFI_OBC
   if (!startWifiAndMdns()) return;
+#else
+  networkReady = true;
+#endif
 
   NimBLEDevice::init(OBC_DEVICE_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -546,6 +668,7 @@ void setup() {
   scan->setActiveScan(true);
   scan->setInterval(45);
   scan->setWindow(30);
+  startZwiftClick();
   scan->start(0, nullptr, false);
   Serial.println("[BLE] scanning for Di2...");
 }
@@ -560,6 +683,7 @@ void loop() {
     return;
   }
 
+#if ENABLE_WIFI_OBC
   if (WiFi.status() == WL_CONNECTED) {
     wifiDisconnectedAt = 0;
   } else if (wifiDisconnectedAt == 0) {
@@ -569,9 +693,10 @@ void loop() {
     delay(500);
     ESP.restart();
   }
+  manageTcpClients();
+#endif
 
   processBleEvents();
-  manageTcpClients();
   servicePendingReleases();
 
   NimBLEAdvertisedDevice* device = takeDiscoveredDevice();
