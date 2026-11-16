@@ -1,35 +1,14 @@
-#include <WiFi.h>
-#include <ESPmDNS.h>
-#include <DNSServer.h>
-#include <WebServer.h>
-#include <Preferences.h>
 #include <NimBLEDevice.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <cstring>
 #include <new>
 #include <vector>
+#include <deque>
 #include "Di2ChannelChanges.h"
+#include "ZwiftRideProtocol.h"
 
-// Zwift cannot use mDNS/TCP, so by default the bridge emulates a Zwift Click
-// over BLE. Build with -DENABLE_WIFI_OBC=1 to use the Wi-Fi OpenBikeControl endpoint instead.
-#ifndef ENABLE_WIFI_OBC
-#define ENABLE_WIFI_OBC 0
-#endif
-
-static const char* OBC_DEVICE_NAME = "Di2 Bridge";
-static const char* OBC_HOSTNAME = "di2bridge";
-static const char* WIFI_PREFERENCES_NAMESPACE = "di2bridge";
-static const char* WIFI_SSID_KEY = "ssid";
-static const char* WIFI_PASSWORD_KEY = "password";
-static const uint16_t OBC_TCP_PORT = 8080;
-static const char* OBC_MANUFACTURER = "DIY";
-static const char* OBC_MODEL = "ESP32-Di2-Bridge";
-static const uint8_t OBC_MAX_CLIENTS = 4;
 static const uint32_t MOMENTARY_PRESS_MS = 80;
-static const uint32_t STATUS_HEARTBEAT_MS = 30000;
-static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 120000;
-static const uint32_t WIFI_DISCONNECT_RESET_MS = 10000;
 
 enum ObcButton : uint8_t {
   OBC_SHIFT_UP = 0x01,
@@ -41,11 +20,15 @@ enum ObcButton : uint8_t {
   OBC_SELECT = 0x14,
   OBC_BACK = 0x15,
   OBC_MENU = 0x16,
+  OBC_STEER_LEFT = 0x18,
+  OBC_STEER_RIGHT = 0x19,
   OBC_EMOTE = 0x20,
   OBC_SCREENSHOT = 0x24,
   OBC_DIFF_UP = 0x30,
   OBC_DIFF_DOWN = 0x31,
   OBC_LAP = 0x35,
+  OBC_U_TURN = 0x37,
+  OBC_POWER_UP = 0x50,
   OBC_NONE = 0x00,
 };
 
@@ -56,10 +39,10 @@ struct ChannelMap {
 };
 
 static const ChannelMap CHANNEL_MAP[4] = {
-  { OBC_SHIFT_UP, OBC_DIFF_UP, OBC_SELECT },
-  { OBC_SHIFT_DOWN, OBC_DIFF_DOWN, OBC_BACK },
-  { OBC_NAV_UP, OBC_MENU, OBC_EMOTE },
-  { OBC_NAV_DOWN, OBC_SCREENSHOT, OBC_LAP },
+  { OBC_SHIFT_DOWN, OBC_POWER_UP, OBC_BACK },
+  { OBC_SHIFT_UP, OBC_EMOTE, OBC_SELECT },
+  { OBC_NAV_LEFT, OBC_STEER_LEFT, OBC_U_TURN },
+  { OBC_NAV_RIGHT, OBC_STEER_RIGHT, OBC_NAV_UP },
 };
 
 static NimBLEUUID DI2_SERVICE_UUID("000018ef-5348-494d-414e-4f5f424c4500");
@@ -78,19 +61,9 @@ struct BleEvent {
   uint8_t data[5];
 };
 
-static const uint8_t MSG_BUTTON_STATE = 0x01;
-static const uint8_t MSG_DEVICE_STATUS = 0x02;
 static const uint8_t STATE_RELEASED = 0x00;
 static const uint8_t STATE_PRESSED = 0x01;
 
-WiFiServer tcpServer(OBC_TCP_PORT);
-WiFiClient clients[OBC_MAX_CLIENTS];
-static DNSServer dnsServer;
-static WebServer portalServer(80);
-static Preferences wifiPreferences;
-static bool networkReady = false;
-static bool portalRunning = false;
-static uint32_t wifiDisconnectedAt = 0;
 static NimBLEClient* bleClient = nullptr;
 static NimBLERemoteCharacteristic* bleButton = nullptr;
 static QueueHandle_t bleEventQueue = nullptr;
@@ -107,139 +80,303 @@ struct PendingRelease {
 };
 
 static std::vector<PendingRelease> pendingReleases;
-static uint32_t lastHeartbeat = 0;
 
 
-// ---- Zwift Click emulation (BLE peripheral) ----
-static NimBLEUUID ZWIFT_SERVICE_UUID("0000fc82-0000-1000-8000-00805f9b34fb");
+// ---- Experimental Zwift Ride emulation (BLE peripheral) ----
+static NimBLEUUID ZWIFT_SERVICE_UUID("00000001-19ca-4651-86e5-fa29dcdd09d1");
+static NimBLEUUID ZWIFT_ADV_UUID("0000fc82-0000-1000-8000-00805f9b34fb");
 static const char* ZWIFT_ASYNC_UUID = "00000002-19ca-4651-86e5-fa29dcdd09d1";
 static const char* ZWIFT_SYNC_RX_UUID = "00000003-19ca-4651-86e5-fa29dcdd09d1";
 static const char* ZWIFT_SYNC_TX_UUID = "00000004-19ca-4651-86e5-fa29dcdd09d1";
 static const uint8_t ZWIFT_RIDE_ON[] = { 'R', 'i', 'd', 'e', 'O', 'n' };
-static const uint8_t ZWIFT_MSG_CLICK_STATE = 0x37;
-static const uint8_t ZWIFT_PRESSED = 0x00;
-static const uint8_t ZWIFT_RELEASED = 0x01;
 static NimBLECharacteristic* zwiftAsync = nullptr;
 static NimBLECharacteristic* zwiftSyncTx = nullptr;
+static NimBLEServer* zwiftServer = nullptr;
 static bool zwiftConnected = false;
-static bool zwiftPlus = false;
-static bool zwiftMinus = false;
+static bool zwiftHandshake = false;
+static bool zwiftSyncBusy = false;
+static uint16_t zwiftConnHandle = BLE_HS_CONN_HANDLE_NONE;
+static uint32_t lastZwiftInput = 0;
+static uint32_t zwiftSyncStartedAt = 0;
+static uint32_t zwiftDownPressedAt = 0;
+static bool zwiftDownReleasePending = false;
+static ZwiftRide::Buttons zwiftButtons;
+static std::deque<ZwiftRide::Bytes> zwiftReplies;
 
-static void sendZwiftClick() {
-  if (zwiftAsync == nullptr || !zwiftConnected) return;
-  uint8_t msg[5] = { ZWIFT_MSG_CLICK_STATE, 0x08, (uint8_t)(zwiftPlus ? ZWIFT_PRESSED : ZWIFT_RELEASED),
-                     0x10, (uint8_t)(zwiftMinus ? ZWIFT_PRESSED : ZWIFT_RELEASED) };
-  zwiftAsync->setValue(msg, sizeof(msg));
-  zwiftAsync->notify();
+enum RideEventType : uint8_t { RIDE_CONNECT, RIDE_DISCONNECT, RIDE_WRITE, RIDE_SYNC_DONE };
+struct RideEvent {
+  RideEventType type;
+  uint16_t connection;
+  uint16_t length;
+  uint8_t data[185];
+};
+static QueueHandle_t rideEventQueue = nullptr;
+
+static void queueRideEvent(const RideEvent& event) {
+  if (xQueueSend(rideEventQueue, &event, 0) != pdPASS) {
+    if (event.type == RIDE_DISCONNECT) {
+      xQueueReset(rideEventQueue);
+      if (xQueueSend(rideEventQueue, &event, 0) != pdPASS) {
+        Serial.println("[Ride] unable to queue disconnect after clearing event queue");
+      } else {
+        Serial.println("[Ride] event queue cleared to deliver disconnect");
+      }
+      return;
+    }
+    Serial.println("[Ride] event queue full; disconnecting central to reset session");
+    for (uint16_t connection : zwiftServer->getPeerDevices()) zwiftServer->disconnect(connection);
+  }
 }
 
-// ---- OpenBikeControl BLE transport (for BikeControl and other OBC apps) ----
-static NimBLEUUID OBC_BLE_SERVICE_UUID("d273f680-d548-419d-b9d1-fa0472345229");
-static const char* OBC_BLE_BUTTON_UUID = "d273f681-d548-419d-b9d1-fa0472345229";
-static const char* OBC_BLE_HAPTIC_UUID = "d273f682-d548-419d-b9d1-fa0472345229";
-static const char* OBC_BLE_APPINFO_UUID = "d273f683-d548-419d-b9d1-fa0472345229";
-static NimBLECharacteristic* obcBleButton = nullptr;
-static bool obcBleConnected = false;
-
-static void notifyObcBle(const uint8_t* msg, size_t len) {
-  if (obcBleButton == nullptr || !obcBleConnected) return;
-  obcBleButton->setValue(msg, len);
-  obcBleButton->notify();
+static void sendZwiftInput() {
+  if (!zwiftConnected || !zwiftHandshake || zwiftAsync->getSubscribedCount() == 0) return;
+  ZwiftRide::Bytes msg = ZwiftRide::inputReport(
+      zwiftButtons.released(), zwiftButtons.leftSteering(), zwiftButtons.rightSteering());
+  zwiftAsync->setValue(msg.data(), msg.size());
+  zwiftAsync->notify();
+  lastZwiftInput = millis();
 }
 
 static void updateZwiftButton(uint8_t buttonId, uint8_t state) {
-  bool pressed = state == STATE_PRESSED;
-  if (buttonId == OBC_SHIFT_UP) zwiftPlus = pressed;
-  else if (buttonId == OBC_SHIFT_DOWN) zwiftMinus = pressed;
-  else return;
-  sendZwiftClick();
+  ZwiftRide::Action action;
+  switch (buttonId) {
+    case OBC_SHIFT_UP: action = ZwiftRide::Action::ShiftUp; break;
+    case OBC_SHIFT_DOWN: action = ZwiftRide::Action::ShiftDown; break;
+    case OBC_DIFF_UP: action = ZwiftRide::Action::IntensityUp; break;
+    case OBC_DIFF_DOWN: action = ZwiftRide::Action::IntensityDown; break;
+    case OBC_NAV_UP: action = ZwiftRide::Action::Up; break;
+    case OBC_NAV_DOWN: action = ZwiftRide::Action::Down; break;
+    case OBC_U_TURN: action = ZwiftRide::Action::Down; break;
+    case OBC_NAV_LEFT: action = ZwiftRide::Action::Left; break;
+    case OBC_NAV_RIGHT: action = ZwiftRide::Action::Right; break;
+    case OBC_STEER_LEFT: action = ZwiftRide::Action::SteerLeft; break;
+    case OBC_STEER_RIGHT: action = ZwiftRide::Action::SteerRight; break;
+    case OBC_SELECT: action = ZwiftRide::Action::Select; break;
+    case OBC_BACK: action = ZwiftRide::Action::Back; break;
+    case OBC_MENU: action = ZwiftRide::Action::Menu; break;
+    case OBC_EMOTE: action = ZwiftRide::Action::Emote; break;
+    case OBC_POWER_UP: action = ZwiftRide::Action::PowerUp; break;
+    default:
+      if (state == STATE_PRESSED) {
+        Serial.printf("[Ride] action 0x%02X has no Ride mapping\n", buttonId);
+      }
+      return;
+  }
+  if (action == ZwiftRide::Action::Down) {
+    if (state == STATE_PRESSED) {
+      zwiftDownPressedAt = millis();
+      zwiftDownReleasePending = false;
+    } else if (millis() - zwiftDownPressedAt < 2000) {
+      // Ride's U-turn binding requires a hold, not a momentary press.
+      zwiftDownReleasePending = true;
+      return;
+    }
+  }
+  if (zwiftButtons.update(action, state == STATE_PRESSED)) sendZwiftInput();
 }
 
 class ZwiftServerCB : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer*) override {
-    zwiftConnected = true;
-    obcBleConnected = true;
-    Serial.println("[BLE] central connected");
-    NimBLEDevice::getAdvertising()->start();
+  void onConnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
+    RideEvent event{};
+    event.type = RIDE_CONNECT;
+    event.connection = desc->conn_handle;
+    queueRideEvent(event);
   }
-  void onDisconnect(NimBLEServer*) override {
-    zwiftConnected = false;
-    obcBleConnected = false;
-    zwiftPlus = zwiftMinus = false;
-    Serial.println("[BLE] central disconnected; advertising again");
-    NimBLEDevice::getAdvertising()->start();
+  void onDisconnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
+    RideEvent event{};
+    event.type = RIDE_DISCONNECT;
+    event.connection = desc->conn_handle;
+    queueRideEvent(event);
+  }
+  void onMTUChange(uint16_t mtu, ble_gap_conn_desc*) override {
+    Serial.printf("[Ride] negotiated MTU %u\n", mtu);
   }
 };
 
 class ZwiftSyncRxCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c) override {
+  void onWrite(NimBLECharacteristic* c, ble_gap_conn_desc* desc) override {
     std::string value = c->getValue();
-    if (value.size() >= sizeof(ZWIFT_RIDE_ON) &&
-        memcmp(value.data(), ZWIFT_RIDE_ON, sizeof(ZWIFT_RIDE_ON)) == 0) {
-      const uint8_t reply[] = { 'R', 'i', 'd', 'e', 'O', 'n', 0x01, 0x03 };
-      zwiftSyncTx->setValue(reply, sizeof(reply));
-      zwiftSyncTx->indicate();
-      Serial.println("[Zwift] RideOn handshake");
+    RideEvent event{};
+    event.type = RIDE_WRITE;
+    event.connection = desc->conn_handle;
+    if (value.size() > sizeof(event.data)) {
+      Serial.println("[Ride] oversized command; disconnecting central");
+      zwiftServer->disconnect(desc->conn_handle);
+      return;
     }
+    event.length = value.size();
+    memcpy(event.data, value.data(), event.length);
+    queueRideEvent(event);
+  }
+};
+
+class ZwiftSyncTxCB : public NimBLECharacteristicCallbacks {
+  void onStatus(NimBLECharacteristic*, Status status, int code) override {
+    if (status != SUCCESS_INDICATE && status != SUCCESS_NOTIFY) {
+      Serial.printf("[Ride] response transmission failed: %d\n", code);
+    }
+    RideEvent event{};
+    event.type = RIDE_SYNC_DONE;
+    event.length = (status == SUCCESS_INDICATE || status == SUCCESS_NOTIFY) ? 0 : 1;
+    queueRideEvent(event);
+  }
+};
+
+class ZwiftInputCB : public NimBLECharacteristicCallbacks {
+  void onStatus(NimBLECharacteristic*, Status status, int code) override {
+    if (status != SUCCESS_NOTIFY) Serial.printf("[Ride] input transmission failed: %d\n", code);
   }
 };
 
 static ZwiftServerCB zwiftServerCB;
 static ZwiftSyncRxCB zwiftSyncRxCB;
+static ZwiftSyncTxCB zwiftSyncTxCB;
+static ZwiftInputCB zwiftInputCB;
 
-static void startZwiftClick() {
+static void processRideCommand(const RideEvent& event) {
+  if (event.length == 0) {
+    Serial.println("[Ride] empty command");
+    return;
+  }
+  Serial.printf("[Ride] RX opcode 0x%02X (%u bytes)\n", event.data[0], event.length);
+  ZwiftRide::Bytes reply;
+  if (event.length >= sizeof(ZWIFT_RIDE_ON) &&
+      memcmp(event.data, ZWIFT_RIDE_ON, sizeof(ZWIFT_RIDE_ON)) == 0) {
+    reply = {'R', 'i', 'd', 'e', 'O', 'n', 2, 4};
+    zwiftHandshake = true;
+    Serial.println("[Ride] unencrypted protocol 2.4 handshake");
+  } else if (!zwiftHandshake) {
+    Serial.println("[Ride] ignoring command before RideOn handshake");
+    return;
+  } else if (event.data[0] == 0x00) {
+    uint32_t object;
+    if (!ZwiftRide::getObjectId(event.data + 1, event.length - 1, object)) {
+      Serial.println("[Ride] malformed GET command");
+      return;
+    }
+    Serial.printf("[Ride] GET object 0x%04lX\n", (unsigned long)object);
+    if (!ZwiftRide::getResponse(object, reply)) {
+      Serial.println("[Ride] unsupported GET object; replying without object data");
+      reply = {0x3C};
+      ZwiftRide::number(reply, 1, object);
+    }
+  } else {
+    Serial.printf("[Ride] opcode 0x%02X not implemented (haptics/game state not acted on)\n",
+                  event.data[0]);
+    return;
+  }
+  if (zwiftReplies.size() >= 8) {
+    Serial.println("[Ride] response queue full; disconnecting central");
+    zwiftServer->disconnect(zwiftConnHandle);
+    return;
+  }
+  zwiftReplies.push_back(reply);
+}
+
+static void serviceZwiftRide() {
+  if (zwiftDownReleasePending && millis() - zwiftDownPressedAt >= 2000) {
+    zwiftDownReleasePending = false;
+    zwiftButtons.update(ZwiftRide::Action::Down, false);
+    sendZwiftInput();
+  }
+  RideEvent event{};
+  while (xQueueReceive(rideEventQueue, &event, 0) == pdPASS) {
+    if (event.type == RIDE_CONNECT) {
+      zwiftConnHandle = event.connection;
+      zwiftConnected = true;
+      zwiftHandshake = zwiftSyncBusy = false;
+      zwiftReplies.clear();
+      Serial.println("[Ride] central connected");
+    } else if (event.type == RIDE_DISCONNECT && event.connection == zwiftConnHandle) {
+      zwiftConnected = false;
+      zwiftHandshake = zwiftSyncBusy = false;
+      zwiftConnHandle = BLE_HS_CONN_HANDLE_NONE;
+      zwiftReplies.clear();
+      Serial.println("[Ride] central disconnected; advertising again");
+      NimBLEDevice::getAdvertising()->start();
+    } else if (event.type == RIDE_SYNC_DONE) {
+      zwiftSyncBusy = false;
+      if (event.length != 0 && zwiftConnected) zwiftServer->disconnect(zwiftConnHandle);
+    } else if (event.type == RIDE_WRITE && event.connection == zwiftConnHandle) {
+      processRideCommand(event);
+    }
+  }
+  if (!zwiftConnected) return;
+  if (zwiftSyncBusy && millis() - zwiftSyncStartedAt >= 5000) {
+    Serial.println("[Ride] response confirmation timed out; disconnecting central");
+    zwiftServer->disconnect(zwiftConnHandle);
+    zwiftSyncStartedAt = millis();
+  }
+  if (!zwiftSyncBusy && !zwiftReplies.empty() && zwiftSyncTx->getSubscribedCount() > 0) {
+    const ZwiftRide::Bytes& reply = zwiftReplies.front();
+    uint16_t mtu = zwiftServer->getPeerMTU(zwiftConnHandle);
+    if (mtu < 3 || reply.size() > size_t(mtu - 3)) {
+      Serial.printf("[Ride] response needs MTU >= %u; peer MTU %u; re-pair with MTU exchange\n",
+                    (unsigned)(reply.size() + 3), mtu);
+      zwiftServer->disconnect(zwiftConnHandle);
+      zwiftReplies.clear();
+      return;
+    }
+    zwiftSyncBusy = true;
+    zwiftSyncStartedAt = millis();
+    zwiftSyncTx->setValue(reply.data(), reply.size());
+    zwiftSyncTx->indicate();
+    zwiftReplies.pop_front();
+  }
+  if (zwiftHandshake && millis() - lastZwiftInput >= 1000) sendZwiftInput();
+}
+
+static void startZwiftRide() {
+  rideEventQueue = xQueueCreate(32, sizeof(RideEvent));
+  if (rideEventQueue == nullptr) {
+    Serial.println("[Ride] could not allocate event queue; restarting");
+    delay(1000);
+    ESP.restart();
+  }
   NimBLEServer* server = NimBLEDevice::createServer();
-  server->setCallbacks(&zwiftServerCB);
+  zwiftServer = server;
+  server->advertiseOnDisconnect(false);
+  server->setCallbacks(&zwiftServerCB, false);
   NimBLEService* service = server->createService(ZWIFT_SERVICE_UUID);
   zwiftAsync = service->createCharacteristic(ZWIFT_ASYNC_UUID, NIMBLE_PROPERTY::NOTIFY);
+  zwiftAsync->setCallbacks(&zwiftInputCB);
   NimBLECharacteristic* rx = service->createCharacteristic(
       ZWIFT_SYNC_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   rx->setCallbacks(&zwiftSyncRxCB);
-  zwiftSyncTx = service->createCharacteristic(ZWIFT_SYNC_TX_UUID, NIMBLE_PROPERTY::INDICATE);
+  zwiftSyncTx = service->createCharacteristic(
+      ZWIFT_SYNC_TX_UUID, NIMBLE_PROPERTY::INDICATE | NIMBLE_PROPERTY::NOTIFY);
+  zwiftSyncTx->setCallbacks(&zwiftSyncTxCB);
+  NimBLECharacteristic* auxiliary = service->createCharacteristic(
+      "00000006-19ca-4651-86e5-fa29dcdd09d1", NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE);
+  auxiliary->setCallbacks(&zwiftSyncRxCB);
   service->start();
+  NimBLEService* battery = server->createService("180f");
+  NimBLECharacteristic* level = battery->createCharacteristic(
+      "2a19", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  uint8_t externalPowerLevel = 100;
+  level->setValue(&externalPowerLevel, 1);
+  battery->start();
 
-  NimBLEService* obcService = server->createService(OBC_BLE_SERVICE_UUID);
-  obcBleButton = obcService->createCharacteristic(
-      OBC_BLE_BUTTON_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  obcService->createCharacteristic(OBC_BLE_HAPTIC_UUID,
-                                   NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  obcService->createCharacteristic(OBC_BLE_APPINFO_UUID,
-                                   NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  obcService->start();
-
-  // Zwift manufacturer id 0x094A (little endian) + Click device type 0x09
-  std::string mfg("\x4A\x09\x09", 3);
+  // 29-byte primary payload: flags + 128-bit user-input service data + Ride manufacturer data.
+  NimBLEAdvertisementData advertisement;
+  advertisement.setFlags(0x06);
+  advertisement.setServiceData(ZWIFT_SERVICE_UUID, std::string("\x02", 1));
+  advertisement.setManufacturerData(std::string("\x4A\x09\x07\x00\x00", 5));
+  NimBLEAdvertisementData scanResponse;
+  scanResponse.setCompleteServices(ZWIFT_ADV_UUID);
+  scanResponse.setName("Zwift Ride");
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->addServiceUUID(ZWIFT_SERVICE_UUID);
-  adv->addServiceUUID(OBC_BLE_SERVICE_UUID);
+  adv->setAdvertisementData(advertisement);
+  adv->setScanResponseData(scanResponse);
   adv->setScanResponse(true);
-  adv->setManufacturerData(mfg);
-  adv->setName("Zwift Click");
   adv->start();
-  Serial.println("[BLE] advertising Zwift Click + OpenBikeControl services");
-}
-
-static void broadcast(const uint8_t* data, size_t len) {
-  for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
-    if (clients[i] && clients[i].connected()) {
-      clients[i].write(data, len);
-    }
-  }
+  Serial.println("[Ride] advertising Zwift Ride");
 }
 
 static void sendButton(uint8_t buttonId, uint8_t state) {
   if (buttonId == OBC_NONE) return;
-  uint8_t msg[3] = { MSG_BUTTON_STATE, buttonId, state };
-  broadcast(msg, sizeof(msg));
-  notifyObcBle(msg, sizeof(msg));
   updateZwiftButton(buttonId, state);
-  Serial.printf("[OBC] button 0x%02X state 0x%02X\n", buttonId, state);
-}
-
-static void sendDeviceStatus() {
-  uint8_t connected = di2Connected ? 0x01 : 0x00;
-  uint8_t msg[3] = { MSG_DEVICE_STATUS, 0xFF, connected };
-  broadcast(msg, sizeof(msg));
+  Serial.printf("[Ride] button 0x%02X state 0x%02X\n", buttonId, state);
 }
 
 static void releasePendingButton(uint8_t buttonId) {
@@ -288,35 +425,9 @@ static void releaseAllButtons() {
     }
     lastPress[i] = PRESS_NONE;
   }
-}
-
-static void manageTcpClients() {
-  WiFiClient incoming = tcpServer.available();
-  if (incoming) {
-    bool placed = false;
-    for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
-      if (!clients[i] || !clients[i].connected()) {
-        clients[i].stop();
-        clients[i] = incoming;
-        clients[i].setNoDelay(true);
-        placed = true;
-        Serial.printf("[OBC] client connected (slot %u)\n", i);
-        uint8_t msg[3] = { MSG_DEVICE_STATUS, 0xFF, (uint8_t)(di2Connected ? 0x01 : 0x00) };
-        clients[i].write(msg, sizeof(msg));
-        break;
-      }
-    }
-    if (!placed) {
-      Serial.println("[OBC] no free client slot, rejecting");
-      incoming.stop();
-    }
-  }
-
-  for (uint8_t i = 0; i < OBC_MAX_CLIENTS; i++) {
-    if (clients[i] && clients[i].connected()) {
-      while (clients[i].available()) clients[i].read();
-    }
-  }
+  zwiftDownReleasePending = false;
+  zwiftButtons.reset();
+  sendZwiftInput();
 }
 
 static PressType decodePress(uint8_t value) {
@@ -492,7 +603,6 @@ static bool connectToDi2(NimBLEAdvertisedDevice* device) {
 
   di2Connected = true;
   Serial.println("[BLE] Di2 bonded and subscribed; ready for D-Fly channel 1-4 input");
-  sendDeviceStatus();
   return true;
 }
 
@@ -508,147 +618,8 @@ static void processBleEvents() {
       bleButton = nullptr;
       di2Connected = false;
       releaseAllButtons();
-      sendDeviceStatus();
     }
   }
-}
-
-static void handleWifiPortalRoot() {
-  static const char page[] =
-      "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-      "<title>Di2 Bridge Wi-Fi</title></head><body><h1>Di2 Bridge Wi-Fi setup</h1>"
-      "<form method='post' action='/save'>"
-      "<label>Wi-Fi name (SSID)<br><input name='ssid' maxlength='32' required></label><br><br>"
-      "<label>Wi-Fi password<br><input name='password' type='password' maxlength='64'></label><br><br>"
-      "<button type='submit'>Save and connect</button></form></body></html>";
-  portalServer.send(200, "text/html", page);
-}
-
-static void redirectToWifiPortal() {
-  portalServer.sendHeader("Location", "/", true);
-  portalServer.send(302, "text/plain", "");
-}
-
-static void handleWifiPortalSave() {
-  if (!portalServer.hasArg("ssid") || !portalServer.hasArg("password")) {
-    portalServer.send(400, "text/plain", "SSID and password fields are required.");
-    return;
-  }
-
-  String ssid = portalServer.arg("ssid");
-  String password = portalServer.arg("password");
-  if (ssid.length() == 0 || ssid.length() > 32 ||
-      (password.length() != 0 && (password.length() < 8 || password.length() > 64))) {
-    portalServer.send(400, "text/plain", "SSID or password length is invalid.");
-    return;
-  }
-  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
-    portalServer.send(500, "text/plain", "Could not open Wi-Fi settings storage.");
-    return;
-  }
-
-  wifiPreferences.putString(WIFI_SSID_KEY, ssid);
-  wifiPreferences.putString(WIFI_PASSWORD_KEY, password);
-  bool credentialsStored = wifiPreferences.getString(WIFI_SSID_KEY, "") == ssid &&
-                          wifiPreferences.getString(WIFI_PASSWORD_KEY, "") == password;
-  wifiPreferences.end();
-  if (!credentialsStored) {
-    portalServer.send(500, "text/plain", "Could not save Wi-Fi settings.");
-    return;
-  }
-  portalServer.send(200, "text/html",
-                    "<!doctype html><html><body><p>Saved. The bridge is restarting and will connect to Wi-Fi.</p></body></html>");
-  delay(500);
-  ESP.restart();
-}
-
-static bool startWifiSetupPortal() {
-  WiFi.mode(WIFI_AP);
-  WiFi.setHostname(OBC_HOSTNAME);
-
-  char setupSsid[32];
-  uint64_t chipId = ESP.getEfuseMac();
-  snprintf(setupSsid, sizeof(setupSsid), "Di2-Bridge-%04X", static_cast<unsigned int>(chipId & 0xFFFF));
-  if (!WiFi.softAP(setupSsid, nullptr, 1, false, 1)) {
-    Serial.println("[WiFi] could not start setup access point");
-    return false;
-  }
-
-  IPAddress portalIp = WiFi.softAPIP();
-  if (!dnsServer.start(53, "*", portalIp)) {
-    Serial.println("[WiFi] captive DNS failed; open http://192.168.4.1 manually");
-  }
-  portalServer.on("/", HTTP_GET, handleWifiPortalRoot);
-  portalServer.on("/save", HTTP_POST, handleWifiPortalSave);
-  portalServer.onNotFound(redirectToWifiPortal);
-  portalServer.begin();
-  portalRunning = true;
-  Serial.printf("[WiFi] setup network: %s\n", setupSsid);
-  Serial.printf("[WiFi] open http://%s to configure network access\n", portalIp.toString().c_str());
-  return true;
-}
-
-static bool startWifiAndMdns() {
-  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
-    Serial.println("[WiFi] could not open settings storage; starting setup portal");
-    if (!startWifiSetupPortal()) {
-      delay(1000);
-      ESP.restart();
-    }
-    return false;
-  }
-  String ssid = wifiPreferences.isKey(WIFI_SSID_KEY)
-                    ? wifiPreferences.getString(WIFI_SSID_KEY, "")
-                    : "";
-  String password = wifiPreferences.isKey(WIFI_PASSWORD_KEY)
-                        ? wifiPreferences.getString(WIFI_PASSWORD_KEY, "")
-                        : "";
-  wifiPreferences.end();
-
-  if (ssid.isEmpty()) {
-    Serial.println("[WiFi] no saved network; starting setup portal");
-    if (!startWifiSetupPortal()) {
-      delay(1000);
-      ESP.restart();
-    }
-    return false;
-  }
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(OBC_HOSTNAME);
-  WiFi.begin(ssid.c_str(), password.c_str());
-  Serial.printf("[WiFi] connecting to %s", ssid.c_str());
-  uint32_t startedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(250);
-    Serial.print('.');
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n[WiFi] connection timed out; keeping saved network and starting setup portal");
-    if (!startWifiSetupPortal()) {
-      delay(1000);
-      ESP.restart();
-    }
-    return false;
-  }
-
-  Serial.printf("\n[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
-  tcpServer.begin();
-  tcpServer.setNoDelay(true);
-  if (!MDNS.begin(OBC_HOSTNAME)) {
-    Serial.println("[mDNS] start failed; TCP server is available only by IP");
-  } else {
-    MDNS.addService("openbikecontrol", "tcp", OBC_TCP_PORT);
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "version", "1");
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "id", WiFi.macAddress());
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "name", OBC_DEVICE_NAME);
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "service-uuids", "d273f680-d548-419d-b9d1-fa0472345229");
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "manufacturer", OBC_MANUFACTURER);
-    MDNS.addServiceTxt("openbikecontrol", "tcp", "model", OBC_MODEL);
-    Serial.printf("[mDNS] _openbikecontrol._tcp on port %u\n", OBC_TCP_PORT);
-  }
-  networkReady = true;
-  return true;
 }
 
 void setup() {
@@ -656,7 +627,7 @@ void setup() {
   uint32_t serialWaitStart = millis();
   while (!Serial && millis() - serialWaitStart < 2000) delay(10);
   delay(200);
-  Serial.println("\nDi2 -> OpenBikeControl bridge starting");
+  Serial.println("\nDi2 -> Zwift Ride bridge starting");
 
   bleEventQueue = xQueueCreate(16, sizeof(BleEvent));
   if (bleEventQueue == nullptr) {
@@ -665,13 +636,9 @@ void setup() {
     ESP.restart();
   }
 
-#if ENABLE_WIFI_OBC
-  if (!startWifiAndMdns()) return;
-#else
-  networkReady = true;
-#endif
-
-  NimBLEDevice::init(OBC_DEVICE_NAME);
+  NimBLEDevice::init("Zwift Ride");
+  int mtuResult = NimBLEDevice::setMTU(185);
+  if (mtuResult != 0) Serial.printf("[Ride] could not set preferred MTU: %d\n", mtuResult);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setSecurityAuth(true, false, false);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
@@ -680,34 +647,13 @@ void setup() {
   scan->setActiveScan(true);
   scan->setInterval(45);
   scan->setWindow(30);
-  startZwiftClick();
+  startZwiftRide();
   scan->start(0, nullptr, false);
   Serial.println("[BLE] scanning for Di2...");
 }
 
 void loop() {
-  if (!networkReady) {
-    if (portalRunning) {
-      dnsServer.processNextRequest();
-      portalServer.handleClient();
-    }
-    delay(2);
-    return;
-  }
-
-#if ENABLE_WIFI_OBC
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiDisconnectedAt = 0;
-  } else if (wifiDisconnectedAt == 0) {
-    wifiDisconnectedAt = millis();
-  } else if (millis() - wifiDisconnectedAt >= WIFI_DISCONNECT_RESET_MS) {
-    Serial.println("[WiFi] connection lost; restarting");
-    delay(500);
-    ESP.restart();
-  }
-  manageTcpClients();
-#endif
-
+  serviceZwiftRide();
   processBleEvents();
   servicePendingReleases();
 
@@ -722,10 +668,5 @@ void loop() {
     scan->start(0, nullptr, false);
   }
 
-  uint32_t now = millis();
-  if (now - lastHeartbeat >= STATUS_HEARTBEAT_MS) {
-    lastHeartbeat = now;
-    sendDeviceStatus();
-  }
   delay(1);
 }
