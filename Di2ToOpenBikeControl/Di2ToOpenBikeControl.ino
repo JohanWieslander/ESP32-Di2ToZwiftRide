@@ -21,7 +21,7 @@ static const char* OBC_MODEL = "ESP32-Di2-Bridge";
 static const uint8_t OBC_MAX_CLIENTS = 4;
 static const uint32_t MOMENTARY_PRESS_MS = 80;
 static const uint32_t STATUS_HEARTBEAT_MS = 30000;
-static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 120000;
 static const uint32_t WIFI_DISCONNECT_RESET_MS = 10000;
 
 enum ObcButton : uint8_t {
@@ -366,7 +366,7 @@ static bool connectToDi2(NimBLEAdvertisedDevice* device) {
   }
 
   di2Connected = true;
-  Serial.println("[BLE] subscribed to Di2 button indications");
+  Serial.println("[BLE] Di2 bonded and subscribed; ready for D-Fly channel 1-4 input");
   sendDeviceStatus();
   return true;
 }
@@ -460,17 +460,6 @@ static bool startWifiSetupPortal() {
   return true;
 }
 
-static bool clearStoredWifiCredentials() {
-  if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
-    Serial.println("[WiFi] could not open settings storage to clear credentials");
-    return false;
-  }
-  wifiPreferences.remove(WIFI_SSID_KEY);
-  wifiPreferences.remove(WIFI_PASSWORD_KEY);
-  wifiPreferences.end();
-  return true;
-}
-
 static bool startWifiAndMdns() {
   if (!wifiPreferences.begin(WIFI_PREFERENCES_NAMESPACE, false)) {
     Serial.println("[WiFi] could not open settings storage; starting setup portal");
@@ -480,8 +469,12 @@ static bool startWifiAndMdns() {
     }
     return false;
   }
-  String ssid = wifiPreferences.getString(WIFI_SSID_KEY, "");
-  String password = wifiPreferences.getString(WIFI_PASSWORD_KEY, "");
+  String ssid = wifiPreferences.isKey(WIFI_SSID_KEY)
+                    ? wifiPreferences.getString(WIFI_SSID_KEY, "")
+                    : "";
+  String password = wifiPreferences.isKey(WIFI_PASSWORD_KEY)
+                        ? wifiPreferences.getString(WIFI_PASSWORD_KEY, "")
+                        : "";
   wifiPreferences.end();
 
   if (ssid.isEmpty()) {
@@ -503,12 +496,7 @@ static bool startWifiAndMdns() {
     Serial.print('.');
   }
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n[WiFi] connection timed out; clearing saved network and restarting");
-    if (clearStoredWifiCredentials()) {
-      delay(500);
-      ESP.restart();
-      return false;
-    }
+    Serial.println("\n[WiFi] connection timed out; keeping saved network and starting setup portal");
     if (!startWifiSetupPortal()) {
       delay(1000);
       ESP.restart();

@@ -19,9 +19,10 @@ and password. The credentials are stored in ESP32 NVS and the bridge restarts
 to connect.
 
 The bridge advertises `_openbikecontrol._tcp.local.` on TCP port 8080 as
-**Di2 Bridge** after connecting to Wi-Fi. If saved credentials fail at boot,
-the bridge clears them and restarts into setup mode. If Wi-Fi is lost for
-10 seconds while running, it restarts and follows the same recovery path.
+**Di2 Bridge** after connecting to Wi-Fi. If it cannot connect within two minutes
+at boot, it keeps the saved credentials and starts the setup portal so you can update them;
+the credentials are replaced only when you submit new ones. If Wi-Fi is lost
+for 10 seconds while running, it restarts and retries the saved network.
 
 ## Default D-Fly mappings
 
