@@ -13,8 +13,7 @@ class Di2ChannelChanges {
     uint8_t changed = 0;
     for (size_t i = 0; i < count; ++i) {
       uint8_t value = data[i + 1];
-      if (initialized_ && i < previousCount_ && value != 0xF0 &&
-          value != previous_[i]) {
+      if (initialized_ && i < previousCount_ && value != previous_[i]) {
         changed |= 1U << i;
       }
       previous_[i] = value;

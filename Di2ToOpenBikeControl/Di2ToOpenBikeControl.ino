@@ -214,7 +214,7 @@ static void startZwiftClick() {
   adv->addServiceUUID(OBC_BLE_SERVICE_UUID);
   adv->setScanResponse(true);
   adv->setManufacturerData(mfg);
-  adv->setName("Zwift Di2-Click");
+  adv->setName("Zwift Click");
   adv->start();
   Serial.println("[BLE] advertising Zwift Click + OpenBikeControl services");
 }
@@ -349,7 +349,6 @@ static void handleDi2Data(const uint8_t* data, size_t len) {
   for (size_t idx = 0; idx < channels; idx++) {
     if (!(changed & (1U << idx))) continue;
     uint8_t raw = data[idx + 1];
-
     PressType press = decodePress(raw);
     PressType previous = lastPress[idx];
     Serial.printf("[Di2] ch%u raw 0x%02X\n", (unsigned)(idx + 1), raw);
@@ -453,6 +452,7 @@ static bool connectToDi2(NimBLEAdvertisedDevice* device) {
     bleClient = NimBLEDevice::createClient();
     bleClient->setClientCallbacks(&clientCB, false);
     bleClient->setConnectTimeout(10);
+    bleClient->setConnectionParams(6, 12, 0, 200);
   }
 
   Serial.println("[BLE] connecting...");
@@ -498,7 +498,10 @@ static bool connectToDi2(NimBLEAdvertisedDevice* device) {
 
 static void processBleEvents() {
   BleEvent event{};
-  while (xQueueReceive(bleEventQueue, &event, 0) == pdPASS) {
+  // Block briefly so button events are handled as soon as they arrive.
+  TickType_t wait = pdMS_TO_TICKS(2);
+  while (xQueueReceive(bleEventQueue, &event, wait) == pdPASS) {
+    wait = 0;
     if (event.type == BLE_EVENT_DATA) {
       handleDi2Data(event.data, event.length);
     } else if (event.type == BLE_EVENT_DISCONNECTED) {
@@ -650,6 +653,8 @@ static bool startWifiAndMdns() {
 
 void setup() {
   Serial.begin(115200);
+  uint32_t serialWaitStart = millis();
+  while (!Serial && millis() - serialWaitStart < 2000) delay(10);
   delay(200);
   Serial.println("\nDi2 -> OpenBikeControl bridge starting");
 
@@ -722,5 +727,5 @@ void loop() {
     lastHeartbeat = now;
     sendDeviceStatus();
   }
-  delay(5);
+  delay(1);
 }

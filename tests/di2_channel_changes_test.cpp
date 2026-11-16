@@ -16,8 +16,13 @@ int main() {
   assert(changes.update(otherChanged, sizeof(otherChanged)) == 0x02);
   assert(changes.update(rawChanged, sizeof(rawChanged)) == 0x01);
   assert(changes.update(released, sizeof(released)) == 0x03);
-  assert(changes.update(unmapped, sizeof(unmapped)) == 0);
+  assert(changes.update(unmapped, sizeof(unmapped)) == 0x01);
   assert(changes.update(mappedAgain, sizeof(mappedAgain)) == 0x01);
+
+  const uint8_t held[] = {7, 0x20, 0x00, 0xF0, 0x00};
+  assert(changes.update(held, sizeof(held)) == 0x01);
+  assert(changes.update(unmapped, sizeof(unmapped)) == 0x01);
+  assert(changes.update(unmapped, sizeof(unmapped)) == 0);
 
   changes.reset();
   assert(changes.update(mappedAgain, sizeof(mappedAgain)) == 0);

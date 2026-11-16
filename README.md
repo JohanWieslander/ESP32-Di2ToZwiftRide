@@ -39,7 +39,8 @@ remain pressed until Di2 reports release.
 
 The first Di2 indication after each connection establishes the channel baseline
 without triggering actions. Later indications trigger actions only for channels
-whose raw value changed; the serial monitor logs the complete indication.
+whose raw value changed. An idle or unmapped `0xF0` value releases a held
+button and re-arms the channel. The serial monitor logs the complete indication.
 
 ## Build and flash
 
