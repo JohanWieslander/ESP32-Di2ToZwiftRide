@@ -36,7 +36,7 @@ static struct {
   void println(const char*) {}
 } Serial;
 
-enum { WIFI_OFF, WIFI_AP };
+enum { WIFI_OFF, WIFI_AP, WIFI_STA, WIFI_AP_STA };
 
 struct FakeAddress {
   String toString() const { return "192.168.4.1"; }
@@ -47,7 +47,14 @@ static struct {
   unsigned stations = 0;
   bool open = false;
   unsigned disconnects = 0;
+  std::string beginSsid, beginPassword;
+  unsigned begins = 0, stationDisconnects = 0;
 
+  void setHostname(const char*) {}
+  void begin(const char* ssid, const char* password) {
+    beginSsid = ssid; beginPassword = password; ++begins;
+  }
+  void disconnect() { ++stationDisconnects; }
   bool mode(int value) { modeValue = value; return true; }
   bool softAP(const char*) { open = true; return true; }
   FakeAddress softAPIP() const { return {}; }
