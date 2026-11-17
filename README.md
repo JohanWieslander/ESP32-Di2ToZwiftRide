@@ -123,3 +123,26 @@ The Ride wire format follows the
 [Zwift Joypad reference implementation](https://github.com/rainyx/zwift-joypad-android).
 Di2 input handling is based on the
 [Di2 media controls service](https://github.com/NitorCreations/shimano-di2-media-controls).
+
+## Di2ToOpenBikeControl (Wi-Fi / mDNS variant)
+
+`Di2ToOpenBikeControl/` is a second sketch with the same Di2 handling and CH1-4
+captive-portal mapping, but instead of emulating a Zwift Ride it serves
+OpenBikeControl over TCP (port 8080, advertised as `_openbikecontrol._tcp` via
+mDNS as **Di2 Bridge**). Messages are `[0x01, button, state]` button events and
+`[0x02, 0xFF, di2Connected]` status messages (sent on connect and every 30 s).
+
+The portal is the open network **Di2-OBC-Bridge** (`http://192.168.4.1`) and
+also has a Wi-Fi section for the SSID/password of your home network. Credentials
+are saved to flash and the bridge connects immediately; once connected it starts
+the TCP server and mDNS. The portal closes 30 seconds after boot if nobody joins
+(or via "Save and close portal"); the station connection stays up. Reboot to
+reopen it. Wi-Fi is not verified on hardware.
+
+Build with the `-obc` environments: `esp32dev-obc`, `esp32-s3-devkitc-1-obc`,
+`esp32-c3-devkitm-1-obc` (e.g. `pio run -e esp32dev-obc`). Its portal test:
+
+```sh
+c++ -std=c++11 -Wall -Wextra -Werror -I tests/fakes \
+  tests/obc_config_portal_test.cpp -o /tmp/di2-obc-portal-test && /tmp/di2-obc-portal-test
+```
